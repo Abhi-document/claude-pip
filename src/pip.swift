@@ -129,12 +129,16 @@ func tail(_ path: String) -> String {
     }
 
     func tick() {
-        FileManager.default.createFile(atPath: url("alive").path, contents: nil)  // heartbeat for pip_hook.py
+        FileManager.default.createFile(atPath: url("alive").path, contents: nil)  // heartbeat for the hooks
         let s = readJSON("session.json")
         if let st = s["status"] as? String {
             let proj = (s["cwd"] as? String ?? "").split(separator: "/").last ?? ""
             status.stringValue = "● \(st)   ·   \(proj)"
             status.textColor = st == "needs approval" ? .systemOrange : st.hasPrefix("waiting") ? .systemGreen : .labelColor
+        }
+        if FileManager.default.fileExists(atPath: url("stop").path) {  // until Claude has actually ended its turn
+            status.stringValue = "■ Stopping… Claude halts before its next action"
+            status.textColor = .systemRed
         }
         if let t = s["transcript"] as? String {
             let l = tail(t)
@@ -173,8 +177,14 @@ func tail(_ path: String) -> String {
     }
 
     @objc func stopClaude() {
-        FileManager.default.createFile(atPath: url("stop").path, contents: nil)  // picked up by the next hook
-        status.stringValue = "■ Stopping — then send your next instruction here"
+        FileManager.default.createFile(atPath: url("stop").path, contents: nil)  // hooks deny every next tool call
+        // Kill the command Claude is running right now: each Bash tool call is its own process group
+        // (a shell spawned by Claude from a shell-snapshot), so this ends the whole command and nothing else.
+        guard let pid = readJSON("session.json")["pid"] as? Int else { return }
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/bin/sh")
+        p.arguments = ["-c", "for g in $(pgrep -P \(pid) -f shell-snapshots/snapshot-); do kill -TERM -$g; done"]
+        try? p.run()
     }
 
     func textDidChange(_ n: Notification) { fitInput() }
@@ -214,13 +224,27 @@ func reply(_ o: [String: Any]) -> Never {
     exit(0)
 }
 
+// PID of the Claude Code process that ran this hook (skipping an `sh -c` wrapper if there is one).
+func claudePID() -> Int {
+    let p = Process(), out = Pipe()
+    p.executableURL = URL(fileURLWithPath: "/bin/ps")
+    p.arguments = ["-o", "ppid=,comm=", "-p", "\(getppid())"]
+    p.standardOutput = out
+    guard (try? p.run()) != nil else { return Int(getppid()) }
+    let f = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        .split(separator: " ", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    p.waitUntilExit()
+    return f.count == 2 && f[1].hasSuffix("sh") ? Int(f[0]) ?? Int(getppid()) : Int(getppid())
+}
+
 func runHook() -> Never {
     let h = (try? JSONSerialization.jsonObject(with: FileHandle.standardInput.readDataToEndOfFile())) as? [String: Any] ?? [:]
     guard alive() else { exit(0) }
     let sid = h["session_id"] as? String ?? ""
     // ponytail: one session at a time, last hook to fire owns the window. Key files by session_id to support several.
     func status(_ s: String) {
-        writeJSON("session.json", ["id": sid, "transcript": h["transcript_path"] ?? "", "cwd": h["cwd"] ?? "", "status": s])
+        writeJSON("session.json", ["id": sid, "transcript": h["transcript_path"] ?? "", "cwd": h["cwd"] ?? "",
+                                   "status": s, "pid": claudePID()])
     }
     func mine() -> Bool { readJSON("session.json")["id"] as? String == sid }
     func rm(_ n: String) { try? FileManager.default.removeItem(at: url(n)) }
@@ -278,6 +302,11 @@ func runHook() -> Never {
 }
 
 if CommandLine.arguments.dropFirst().first == "hook" { runHook() }
+
+// Leave the process group of the command that launched us, or Claude Code kills the window
+// along with that command when a turn is stopped.
+setsid()
+signal(SIGHUP, SIG_IGN)
 
 MainActor.assumeIsolated {
     let app = NSApplication.shared

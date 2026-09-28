@@ -43,7 +43,7 @@ A floating window appears in the bottom-right corner of your screen. Drag it any
 ## Good to know
 
 - While the window is open, Claude waits for your next instruction **from the window**. Close the window to type in the terminal again.
-- **Stop** can't cut off a command that's already running; Claude halts right after it.
+- **Stop** ends a running command immediately. If Claude is in the middle of writing a reply, it finishes that reply, then stops.
 - It follows one session at a time: whichever session was active most recently.
 - Questions Claude asks you (multiple choice) still appear in the terminal.
 

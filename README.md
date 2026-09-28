@@ -45,6 +45,7 @@ Click **Notch** in the window (or open it with `/pip notch`) to hide it and move
 - 👀 its eyes **look around** while Claude works, **bounce orange** when Claude needs your OK, and turn **green** when it's done
 - 🖱️ **hover over the notch** to open it: status, what Claude just did, Approve / Decline / Stop, and a **chat box** to send instructions
 - 👻 move over the pill beside the notch and it turns see-through, so the menu bar items under it stay clickable
+- 💬 when Claude finishes, it **tells you the answer** in a speech bubble. Long answers come in pages: click the right side for the next page, the left side to go back
 - 💖 **click the agent** and it reacts
 - click **Window** to go back to the floating window
 
@@ -69,4 +70,4 @@ No notch? It still works: the agent sits at the top center of your screen.
 
 ### For developers
 
-`src/pip.swift` is the whole app: the floating window, `ClaudePiP open` (used by the `/pip` skill), plus `ClaudePiP hook`, which Claude Code runs on `PermissionRequest`, `PreToolUse`, `Stop` and `UserPromptSubmit`. The two talk through small files in `~/.claude/pip/`. Rebuild the universal binary with `./build.sh` (needs Xcode command line tools).
+`src/pip.swift` is the whole app: the floating window, `ClaudePiP open` (used by the `/pip` skill), plus `ClaudePiP hook`, which Claude Code runs on `PermissionRequest`, `PreToolUse`, `PostToolUse`, `Stop` and `UserPromptSubmit`. The two talk through small files in `~/.claude/pip/`. Rebuild the universal binary with `./build.sh` (needs Xcode command line tools).

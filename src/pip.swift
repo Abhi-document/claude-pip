@@ -54,13 +54,13 @@ func brief(_ input: Any?) -> String {
     return String(decoding: d, as: UTF8.self)
 }
 
-// Last ~30 messages from the tail of the session transcript (JSONL).
-func tail(_ path: String) -> String {
-    guard let h = FileHandle(forReadingAtPath: path) else { return "" }
+// Last ~30 messages from the tail of the session transcript (JSONL), plus Claude's latest reply.
+func tail(_ path: String) -> (log: String, reply: String) {
+    guard let h = FileHandle(forReadingAtPath: path) else { return ("", "") }
     defer { try? h.close() }
     let size = h.seekToEndOfFile()
     h.seek(toFileOffset: size > 131_072 ? size - 131_072 : 0)
-    var out: [String] = []
+    var out: [String] = [], reply = ""
     for line in String(decoding: h.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n") {
         guard let o = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
               let type = o["type"] as? String, type == "user" || type == "assistant",
@@ -70,13 +70,15 @@ func tail(_ path: String) -> String {
         if let s = msg["content"] as? String { out.append(who + s); continue }
         for b in msg["content"] as? [[String: Any]] ?? [] {
             switch b["type"] as? String {
-            case "text": out.append(who + (b["text"] as? String ?? ""))
+            case "text":
+                out.append(who + (b["text"] as? String ?? ""))
+                if type == "assistant" { reply = b["text"] as? String ?? "" }
             case "tool_use": out.append("⚙ \(b["name"] as? String ?? ""): \(brief(b["input"]).prefix(200))")
             default: break
             }
         }
     }
-    return out.suffix(30).joined(separator: "\n\n")
+    return (out.suffix(30).joined(separator: "\n\n"), reply)
 }
 
 // MARK: notch mode: a cute agent living in the MacBook notch. Hover to open it: status, approvals, chat box.
@@ -84,8 +86,10 @@ func tail(_ path: String) -> String {
 final class Flipped: NSView { override var isFlipped: Bool { true } }
 
 final class Tap: NSView {
-    var onClick: () -> Void = {}
-    override func mouseDown(with e: NSEvent) { onClick() }
+    var onClick: (NSPoint) -> Void = { _ in }
+    var hand = false
+    override func mouseDown(with e: NSEvent) { onClick(convert(e.locationInWindow, from: nil)) }
+    override func resetCursorRects() { if hand { addCursorRect(bounds, cursor: .pointingHand) } }
     override func acceptsFirstMouse(for e: NSEvent?) -> Bool { true }
 }
 
@@ -97,6 +101,8 @@ final class Tap: NSView {
     let head = CALayer(), face = CALayer(), gaze = CALayer(), eyes = [CALayer(), CALayer()], dot = CALayer()
     let title = NSTextField(labelWithString: ""), info = NSTextField(wrappingLabelWithString: "")
     let chat = NSTextField()
+    let pageTap = Tap(), pageLabel = NSTextField(labelWithString: "")
+    var reply = "", pages: [String] = [], page = 0, shown = "", typer: Timer?
     let approve: NSButton, decline: NSButton, stop: NSButton, back: NSButton
     var hovering = false, ghost = false, expanded = false, popUntil = Date.distantPast, reactUntil = Date.distantPast
     var lastStatus = "", mood = "", reaction = ""
@@ -124,6 +130,11 @@ final class Tap: NSView {
         chat.target = self
         chat.action = #selector(sendChat)
         chat.focusRingType = .none
+        // Click the right half of the reply for the next page, the left half for the previous one.
+        pageTap.hand = true
+        pageTap.onClick = { [unowned self] p in p.x < pageTap.bounds.midX ? prevPage() : nextPage() }
+        pageLabel.textColor = NSColor.white.withAlphaComponent(0.55)
+        pageLabel.font = .systemFont(ofSize: 9)
 
         panel.level = .statusBar  // above the menu bar, where the notch is
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
@@ -148,16 +159,19 @@ final class Tap: NSView {
         dot.cornerRadius = 4
         content.layer?.addSublayer(head)
         content.layer?.addSublayer(dot)
-        tap.onClick = { [unowned self] in react() }
+        tap.onClick = { [unowned self] _ in react() }
         tap.toolTip = "Poke me!"
 
         title.font = .boldSystemFont(ofSize: 13)
         title.textColor = .white
-        info.font = .systemFont(ofSize: 11)
-        info.textColor = NSColor.white.withAlphaComponent(0.72)
-        info.maximumNumberOfLines = 2
-        info.lineBreakMode = .byTruncatingTail
-        for v in [title, info, approve, decline, stop, back, chat, tap] as [NSView] { content.addSubview(v) }
+        info.font = .systemFont(ofSize: 13)
+        info.textColor = NSColor.white.withAlphaComponent(0.9)
+        info.maximumNumberOfLines = 4
+        info.lineBreakMode = .byWordWrapping
+        info.cell?.truncatesLastVisibleLine = true
+        for v in [title, info, approve, decline, stop, back, chat, tap, pageLabel, pageTap] as [NSView] {
+            content.addSubview(v)
+        }
 
         // Mouse tracking (no permissions needed for mouse moves): hover opens the notch, eyes follow the cursor.
         NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { _ in MainActor.assumeIsolated { self.mouseMoved() } }
@@ -176,7 +190,7 @@ final class Tap: NSView {
 
     func place(animated: Bool) {
         let w = expanded ? max(notchWidth + 120, 440) : notchWidth + 90
-        let h = expanded ? strip + 140 : strip
+        let h = expanded ? strip + 184 : strip
         let f = screen.frame
         let frame = NSRect(x: f.midX - w / 2, y: f.maxY - h, width: w, height: h)
         let x0: CGFloat = 104, cw = w - x0 - 16
@@ -200,13 +214,16 @@ final class Tap: NSView {
 
         tap.frame = NSRect(origin: head.frame.origin, size: head.frame.size)
         title.frame = NSRect(x: x0, y: strip + 10, width: cw, height: 18)
-        info.frame = NSRect(x: x0, y: strip + 30, width: cw, height: 30)
-        approve.frame = NSRect(x: x0 - 4, y: strip + 62, width: 92, height: 28)
-        decline.frame = NSRect(x: x0 + 90, y: strip + 62, width: 92, height: 28)
-        stop.frame = NSRect(x: x0 - 4, y: strip + 62, width: 92, height: 28)
-        back.frame = NSRect(x: w - 96, y: strip + 62, width: 84, height: 28)
-        chat.frame = NSRect(x: 18, y: strip + 100, width: w - 36, height: 26)
-        if !expanded { [title, info, approve, decline, stop, back, chat].forEach { $0.isHidden = true } }
+        info.frame = NSRect(x: x0, y: strip + 32, width: cw, height: 76)
+        pageTap.frame = info.frame
+        approve.frame = NSRect(x: x0 - 4, y: strip + 110, width: 92, height: 28)
+        decline.frame = NSRect(x: x0 + 90, y: strip + 110, width: 92, height: 28)
+        stop.frame = NSRect(x: x0 - 4, y: strip + 110, width: 92, height: 28)
+        pageLabel.frame = NSRect(x: x0, y: strip + 117, width: 160, height: 14)
+        back.frame = NSRect(x: w - 96, y: strip + 110, width: 84, height: 28)
+        chat.frame = NSRect(x: 18, y: strip + 148, width: w - 36, height: 26)
+        pageTap.window?.invalidateCursorRects(for: pageTap)
+        if !expanded { [title, info, approve, decline, stop, back, chat, pageLabel, pageTap].forEach { $0.isHidden = true } }
         panel.hasShadow = expanded
         if animated {
             NSAnimationContext.runAnimationGroup { $0.duration = 0.25; panel.animator().setFrame(frame, display: true) }
@@ -216,8 +233,9 @@ final class Tap: NSView {
     }
 
     // Called every tick with the session state.
-    func update(status st: String, note: String?, request: String?, last: String) {
-        if st != lastStatus, st.hasPrefix("waiting"), !lastStatus.isEmpty { popUntil = Date().addingTimeInterval(5) }  // done!
+    func update(status st: String, note: String?, request: String?, last: String, reply: String) {
+        if st != lastStatus, st.hasPrefix("waiting"), !lastStatus.isEmpty { popUntil = Date().addingTimeInterval(8) }  // done!
+        if reply != self.reply { self.reply = reply; pages = paginate(reply); page = 0 }
         lastStatus = st
         status = st; self.note = note; self.request = request; self.last = last
         refresh()
@@ -230,7 +248,9 @@ final class Tap: NSView {
         title.stringValue = Date() < reactUntil ? reaction : note ?? [
             "approval": "Claude needs your OK 👀", "working": "Working on it…",
             "waiting": "Done! What's next? ✨", "idle": "Napping… 💤"][m]!
-        info.stringValue = request ?? last
+        // Done: Claude's reply, a page at a time. Otherwise: the request, or what Claude is doing.
+        let talking = m == "waiting" && !pages.isEmpty
+        show(request ?? (talking ? pages[page] : last), typed: talking)
         let typing = panel.isKeyWindow && chat.currentEditor() != nil
         let open = hovering || typing || request != nil || Date() < popUntil
         if open != expanded {
@@ -244,7 +264,51 @@ final class Tap: NSView {
         approve.isHidden = request == nil
         decline.isHidden = request == nil
         stop.isHidden = request != nil || m != "working"
+        let paged = talking && pages.count > 1
+        [pageLabel, pageTap].forEach { $0.isHidden = !paged }
+        pageLabel.stringValue = pages.indices.map { $0 == page ? "●" : "○" }.joined(separator: " ")
     }
+
+    // Plain text in ~4-line pages, split between words, preferably at the end of a sentence.
+    func paginate(_ text: String) -> [String] {
+        let plain = text.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
+            .replacingOccurrences(of: #"(?m)^#+\s*"#, with: "", options: .regularExpression)
+        var pages: [String] = [], cur = ""
+        for word in plain.split(whereSeparator: \.isWhitespace) {
+            if cur.count + word.count + 1 > 170, !cur.isEmpty { pages.append(cur); cur = "" }
+            cur += (cur.isEmpty ? "" : " ") + word
+            if cur.count > 110, let c = word.last, ".!?:".contains(c) { pages.append(cur); cur = "" }  // end on a sentence
+        }
+        if !cur.isEmpty { pages.append(cur) }
+        return pages
+    }
+
+    // Replies type out like the agent is talking; everything else appears at once.
+    func show(_ text: String, typed: Bool) {
+        guard text != shown else { return }
+        shown = text
+        typer?.invalidate()
+        guard typed else { info.attributedStringValue = styled(text); return }
+        let chars = Array(text)
+        var n = 0
+        typer = Timer.scheduledTimer(withTimeInterval: 0.016, repeats: true) { t in
+            MainActor.assumeIsolated {
+                n = min(n + 3, chars.count)
+                self.info.attributedStringValue = self.styled(String(chars[..<n]))
+                if n == chars.count { t.invalidate() }
+            }
+        }
+    }
+
+    func styled(_ s: String) -> NSAttributedString {
+        let p = NSMutableParagraphStyle()
+        p.lineSpacing = 2.5
+        p.lineBreakMode = .byWordWrapping
+        return NSAttributedString(string: s, attributes: [.font: info.font!, .foregroundColor: info.textColor!, .paragraphStyle: p])
+    }
+
+    @objc func prevPage() { page = max(page - 1, 0); refresh() }
+    @objc func nextPage() { page = min(page + 1, pages.count - 1); refresh() }
 
     func mouseMoved() {
         guard panel.isVisible else { return }
@@ -367,9 +431,10 @@ final class Tap: NSView {
     let inputScroll = NSTextView.scrollableTextView()
     var input: NSTextView { inputScroll.documentView as! NSTextView }
     var inputHeight: NSLayoutConstraint!
-    var reqID = "", answered = "", lastLog = "", note = ""
+    var reqID = "", answered = "", lastLog = "", lastReply = "", note = ""
     var noteUntil = Date.distantPast
     lazy var notch = Notch(app: self)
+    var activity: NSObjectProtocol?
     var notchMode = false
 
     func applicationDidFinishLaunching(_ n: Notification) {
@@ -443,7 +508,12 @@ final class Tap: NSView {
         panel.orderFrontRegardless()
         debugLog("window opened, pid \(getpid())")
         tick()
-        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in MainActor.assumeIsolated { self.tick() } }
+        // The hooks treat a stale heartbeat as "window closed": keep it beating while the mouse is held down
+        // (common run loop modes) and when macOS would otherwise App Nap this background app.
+        activity = ProcessInfo.processInfo.beginActivity(options: .userInitiatedAllowingIdleSystemSleep,
+                                                         reason: "Heartbeat for Claude Code hooks")
+        RunLoop.main.add(Timer(timeInterval: 0.5, repeats: true) { _ in MainActor.assumeIsolated { self.tick() } },
+                         forMode: .common)
         if CommandLine.arguments.contains("--notch") { toggleNotch() }
     }
 
@@ -463,7 +533,8 @@ final class Tap: NSView {
             status.textColor = .systemRed
         }
         if let t = s["transcript"] as? String {
-            let l = tail(t)
+            let (l, r) = tail(t)
+            lastReply = r
             if l != lastLog { lastLog = l; log.string = l; log.scrollToEndOfDocument(nil) }
         }
         let r = readJSON("request.json")
@@ -477,7 +548,7 @@ final class Tap: NSView {
         if notchMode {
             notch.update(status: s["status"] as? String ?? "", note: Date() < noteUntil ? note : nil,
                          request: reqBox.isHidden ? nil : reqLabel.stringValue,
-                         last: lastLog.components(separatedBy: "\n\n").last ?? "")
+                         last: lastLog.components(separatedBy: "\n\n").last ?? "", reply: lastReply)
         }
     }
 
@@ -570,7 +641,7 @@ final class Tap: NSView {
 
 func alive() -> Bool {
     let m = (try? FileManager.default.attributesOfItem(atPath: url("alive").path))?[.modificationDate] as? Date
-    return m.map { Date().timeIntervalSince($0) < 3 } ?? false
+    return m.map { Date().timeIntervalSince($0) < 10 } ?? false  // closing deletes the file, so this only matters on a crash
 }
 
 func takeInbox() -> String? {
@@ -615,7 +686,10 @@ func runHook() -> Never {
     let stopped = "The user pressed Stop in the PiP window. Do not run any more tools. End your turn now with one short line saying where you stopped."
 
     switch h["hook_event_name"] as? String {
+    case "PostToolUse":
+        rm("request.json")  // answered in the terminal / VS Code panel instead: clear it from the window
     case "UserPromptSubmit":
+        rm("request.json")
         rm("stop")  // a stale click must not kill a fresh prompt
         status("working")
     case "PreToolUse":
@@ -645,6 +719,7 @@ func runHook() -> Never {
         }
         if readJSON("request.json")["id"] as? String == rid { rm("request.json") }  // window closed: normal prompt
     case "Stop":
+        rm("request.json")
         status("waiting for instruction")
         while alive(), mine() {
             rm("stop")  // already stopped; a click while waiting must not block the next instruction

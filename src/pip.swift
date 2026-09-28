@@ -629,6 +629,23 @@ func runHook() -> Never {
 
 if CommandLine.arguments.dropFirst().first == "hook" { runHook() }
 
+// `ClaudePiP open [notch]`: start the window as its own background process and return at once,
+// so /pip needs no `&` (Claude Code's permission check rejects background operators).
+if CommandLine.arguments.dropFirst().first == "open" {
+    let notch = CommandLine.arguments.contains("notch")
+    if alive() { print("The PiP window is already open."); exit(0) }
+    let p = Process()
+    p.executableURL = Bundle.main.executableURL
+    p.arguments = notch ? ["--notch"] : []
+    p.standardInput = FileHandle.nullDevice
+    p.standardOutput = FileHandle.nullDevice
+    p.standardError = FileHandle.nullDevice
+    do { try p.run() } catch { print("Couldn't open the PiP window: \(error)"); exit(1) }
+    print(notch ? "The notch agent is open: hover over the notch to chat, approve or decline."
+                : "The PiP window is open: approve/decline and send instructions from it. Close it to return control here.")
+    exit(0)
+}
+
 // Leave the process group of the command that launched us, or Claude Code kills the window
 // along with that command when a turn is stopped.
 setsid()

@@ -40,7 +40,7 @@ A floating window appears in the bottom-right corner of your screen. Drag it any
 
 ### 🐣 Notch mode
 
-Click **Notch** in the window to hide it and move into your MacBook's notch instead. A tiny agent lives there:
+Click **Notch** in the window (or open it with `/pip notch`) to hide it and move into your MacBook's notch instead. A tiny agent lives there:
 
 - 👀 its eyes **look around** while Claude works, **bounce orange** when Claude needs your OK, and turn **green** when it's done
 - 🖱️ **hover over the notch** to open it: status, what Claude just did, Approve / Decline / Stop, and a **chat box** to send instructions
@@ -68,4 +68,4 @@ No notch? It still works: the agent sits at the top center of your screen.
 
 ### For developers
 
-`src/pip.swift` is the whole app: the floating window, plus `ClaudePiP hook`, which Claude Code runs on `PermissionRequest`, `PreToolUse`, `Stop` and `UserPromptSubmit`. The two talk through small files in `~/.claude/pip/`. Rebuild the universal binary with `./build.sh` (needs Xcode command line tools).
+`src/pip.swift` is the whole app: the floating window, `ClaudePiP open` (used by the `/pip` skill), plus `ClaudePiP hook`, which Claude Code runs on `PermissionRequest`, `PreToolUse`, `Stop` and `UserPromptSubmit`. The two talk through small files in `~/.claude/pip/`. Rebuild the universal binary with `./build.sh` (needs Xcode command line tools).

@@ -79,7 +79,8 @@ func tail(_ path: String) -> String {
     let inputScroll = NSTextView.scrollableTextView()
     var input: NSTextView { inputScroll.documentView as! NSTextView }
     var inputHeight: NSLayoutConstraint!
-    var reqID = "", answered = "", lastLog = ""
+    var reqID = "", answered = "", lastLog = "", note = ""
+    var noteUntil = Date.distantPast
 
     func applicationDidFinishLaunching(_ n: Notification) {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -92,6 +93,8 @@ func tail(_ path: String) -> String {
         panel.onEscape = { [unowned self] in stopClaude() }
 
         status.font = .boldSystemFont(ofSize: 12)
+        status.cell?.wraps = true
+        status.maximumNumberOfLines = 2
         log.isEditable = false
         log.font = .systemFont(ofSize: 12)
         log.textContainerInset = NSSize(width: 4, height: 6)
@@ -130,7 +133,7 @@ func tail(_ path: String) -> String {
         stack.distribution = .fill
         stack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         panel.contentView = stack
-        for v in [scroll, reqBox, row] as [NSView] {
+        for v in [status, scroll, reqBox, row] as [NSView] {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20).isActive = true
         }
         reqLabel.widthAnchor.constraint(equalTo: reqBox.widthAnchor).isActive = true
@@ -155,8 +158,11 @@ func tail(_ path: String) -> String {
             status.stringValue = "● \(st)   ·   \(proj)"
             status.textColor = st == "needs approval" ? .systemOrange : st.hasPrefix("waiting") ? .systemGreen : .labelColor
         }
-        if FileManager.default.fileExists(atPath: url("stop").path) {  // until Claude has actually ended its turn
-            status.stringValue = "■ Stopping… Claude halts before its next action"
+        if Date() < noteUntil {  // what the last Stop click did
+            status.stringValue = note
+            status.textColor = .systemRed
+        } else if FileManager.default.fileExists(atPath: url("stop").path) {  // until Claude has ended its turn
+            status.stringValue = "■ Stopping… Claude won't start anything new"
             status.textColor = .systemRed
         }
         if let t = s["transcript"] as? String {
@@ -196,15 +202,35 @@ func tail(_ path: String) -> String {
     }
 
     @objc func stopClaude() {
+        let s = readJSON("session.json"), st = s["status"] as? String ?? ""
+        guard ["working", "needs approval", "stopping"].contains(st) else {
+            return flash("Nothing to stop: Claude isn't working right now")
+        }
         FileManager.default.createFile(atPath: url("stop").path, contents: nil)  // hooks deny every next tool call
         // Kill the command Claude is running right now: each Bash tool call is its own process group
         // (a shell spawned by Claude from a shell-snapshot), so this ends the whole command and nothing else.
-        guard let pid = readJSON("session.json")["pid"] as? Int else { return debugLog("stop: no claude pid yet") }
-        debugLog("stop clicked, claude pid \(pid)")
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", "for g in $(pgrep -P \(pid) -f shell-snapshots/snapshot-); do echo \"$(date) stop: killing group $g: $(ps -o command= -p $g | cut -c1-150)\" >> '\(url("log.txt").path)'; kill -TERM -$g; done"]
-        try? p.run()
+        var killed = 0
+        if let pid = s["pid"] as? Int {
+            let p = Process(), out = Pipe()
+            p.executableURL = URL(fileURLWithPath: "/bin/sh")
+            p.arguments = ["-c", "for g in $(pgrep -P \(pid) -f shell-snapshots/snapshot-); do echo \"$(date) stop: killing group $g: $(ps -o command= -p $g | cut -c1-150)\" >> '\(url("log.txt").path)'; kill -TERM -$g && echo k; done"]
+            p.standardOutput = out
+            if (try? p.run()) != nil {
+                killed = String(decoding: out.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self).split(separator: "\n").count
+                p.waitUntilExit()
+            }
+        }
+        debugLog("stop clicked (status \(st)), killed \(killed) command(s)")
+        // A reply being written can't be cut off from outside Claude Code (only Esc in its own panel can);
+        // it ends after that reply because every further tool call is denied.
+        flash(killed > 0 ? "■ Stopped the running command. Claude is ending its turn"
+                         : "■ Claude is finishing its current reply, then stops (it won't start anything new)")
+    }
+
+    func flash(_ note: String) {
+        self.note = note
+        noteUntil = Date().addingTimeInterval(5)
+        tick()
     }
 
     func textDidChange(_ n: Notification) { fitInput() }

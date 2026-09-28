@@ -12,6 +12,23 @@ func readJSON(_ n: String) -> [String: Any] {
     return (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] ?? [:]
 }
 
+// Append-only debug log (~/.claude/pip/log.txt): why the window closed, what Stop killed.
+func debugLog(_ msg: String) {
+    guard let h = FileHandle(forWritingAtPath: url("log.txt").path) ?? {
+        FileManager.default.createFile(atPath: url("log.txt").path, contents: nil)
+        return FileHandle(forWritingAtPath: url("log.txt").path)
+    }() else { return }
+    h.seekToEndOfFile()
+    h.write(Data("\(Date()) \(msg)\n".utf8))
+    try? h.close()
+}
+
+// Esc stops Claude (like in Claude Code) instead of closing the panel, AppKit's default.
+final class Panel: NSPanel {
+    var onEscape: () -> Void = {}
+    override func cancelOperation(_ sender: Any?) { onEscape() }
+}
+
 func writeJSON(_ n: String, _ o: [String: Any]) {
     guard let d = try? JSONSerialization.data(withJSONObject: o) else { return }
     try? d.write(to: url(n), options: .atomic)
@@ -51,7 +68,7 @@ func tail(_ path: String) -> String {
 }
 
 @MainActor final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDelegate {
-    let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 480),
+    let panel = Panel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 480),
                         styleMask: [.titled, .closable, .resizable, .utilityWindow, .nonactivatingPanel],
                         backing: .buffered, defer: false)
     let status = NSTextField(labelWithString: "Open — waiting for Claude Code to finish a turn…")
@@ -72,6 +89,7 @@ func tail(_ path: String) -> String {
         panel.hidesOnDeactivate = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.delegate = self
+        panel.onEscape = { [unowned self] in stopClaude() }
 
         status.font = .boldSystemFont(ofSize: 12)
         log.isEditable = false
@@ -124,6 +142,7 @@ func tail(_ path: String) -> String {
             panel.setFrameOrigin(NSPoint(x: f.maxX - 400, y: f.minY + 20))
         }
         panel.orderFrontRegardless()
+        debugLog("window opened, pid \(getpid())")
         tick()
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in MainActor.assumeIsolated { self.tick() } }
     }
@@ -180,10 +199,11 @@ func tail(_ path: String) -> String {
         FileManager.default.createFile(atPath: url("stop").path, contents: nil)  // hooks deny every next tool call
         // Kill the command Claude is running right now: each Bash tool call is its own process group
         // (a shell spawned by Claude from a shell-snapshot), so this ends the whole command and nothing else.
-        guard let pid = readJSON("session.json")["pid"] as? Int else { return }
+        guard let pid = readJSON("session.json")["pid"] as? Int else { return debugLog("stop: no claude pid yet") }
+        debugLog("stop clicked, claude pid \(pid)")
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/bin/sh")
-        p.arguments = ["-c", "for g in $(pgrep -P \(pid) -f shell-snapshots/snapshot-); do kill -TERM -$g; done"]
+        p.arguments = ["-c", "for g in $(pgrep -P \(pid) -f shell-snapshots/snapshot-); do echo \"$(date) stop: killing group $g: $(ps -o command= -p $g | cut -c1-150)\" >> '\(url("log.txt").path)'; kill -TERM -$g; done"]
         try? p.run()
     }
 
@@ -196,13 +216,17 @@ func tail(_ path: String) -> String {
     }
 
     func textView(_ tv: NSTextView, doCommandBy sel: Selector) -> Bool {
+        if sel == #selector(NSResponder.cancelOperation(_:)) { stopClaude(); return true }  // Esc while typing
         guard sel == #selector(NSResponder.insertNewline(_:)) else { return false }
         if NSApp.currentEvent?.modifierFlags.contains(.shift) == true { tv.insertNewlineIgnoringFieldEditor(nil) } else { send() }
         return true
     }
 
-    func windowWillClose(_ n: Notification) { NSApp.terminate(nil) }
-    func applicationWillTerminate(_ n: Notification) { try? FileManager.default.removeItem(at: url("alive")) }
+    func windowWillClose(_ n: Notification) { debugLog("window closed"); NSApp.terminate(nil) }
+    func applicationWillTerminate(_ n: Notification) {
+        debugLog("app terminating")
+        try? FileManager.default.removeItem(at: url("alive"))
+    }
 }
 
 // MARK: hook mode. No-op unless the window is open (it touches ~/.claude/pip/alive every 0.5s).

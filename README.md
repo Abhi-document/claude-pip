@@ -35,7 +35,7 @@ A floating window appears in the bottom-right corner of your screen. Drag it any
 |---|---|
 | **● status** | `working`, `needs approval` (plays a sound), or `waiting for instruction` |
 | **Approve / Decline** | Answers Claude's permission request. Type a reason in the box before clicking Decline and Claude sees it |
-| **Stop** | Stops the current task, like pressing Esc (also cancels a pending approval). Then type your next instruction in the window |
+| **Stop** (or **Esc**) | Stops the current task right away, including a running command (also cancels a pending approval). Then type your next instruction in the window |
 | **Message box** | **Enter** sends, **Shift+Enter** adds a new line. The box grows as you type |
 
 **To go back to normal:** close the window. Claude Code works exactly as before.

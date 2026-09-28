@@ -100,7 +100,10 @@ func tail(_ path: String) -> String {
         inputScroll.borderType = .bezelBorder
         inputHeight = inputScroll.heightAnchor.constraint(equalToConstant: 28)
         inputHeight.isActive = true
-        let row = NSStackView(views: [inputScroll, NSButton(title: "Send", target: self, action: #selector(send))])
+        let stop = NSButton(title: "Stop", target: self, action: #selector(stopClaude))
+        stop.bezelColor = .systemRed
+        stop.toolTip = "Stop Claude (at its next step) and hand control back to the terminal"
+        let row = NSStackView(views: [inputScroll, NSButton(title: "Send", target: self, action: #selector(send)), stop])
         row.alignment = .bottom
 
         let stack = NSStackView(views: [status, scroll, reqBox, row])
@@ -169,6 +172,11 @@ func tail(_ path: String) -> String {
         status.stringValue = "✉︎ Sent — Claude picks it up when its current turn ends"
     }
 
+    @objc func stopClaude() {
+        FileManager.default.createFile(atPath: url("stop").path, contents: nil)  // picked up by the next hook
+        status.stringValue = "■ Stopping — Claude halts at its next step"
+    }
+
     func textDidChange(_ n: Notification) { fitInput() }
 
     func fitInput() {
@@ -216,15 +224,25 @@ func runHook() -> Never {
     }
     func mine() -> Bool { readJSON("session.json")["id"] as? String == sid }
     func rm(_ n: String) { try? FileManager.default.removeItem(at: url(n)) }
+    func takeStop() -> Bool { (try? FileManager.default.removeItem(at: url("stop"))) != nil }
+    let stopped = "Stopped by the user from the PiP window."
 
     switch h["hook_event_name"] as? String {
     case "UserPromptSubmit":
+        rm("stop")  // a stale click must not kill a fresh prompt
         status("working")
+    case "PreToolUse":
+        if takeStop() { status("stopped"); reply(["continue": false, "stopReason": stopped]) }
     case "PermissionRequest" where h["tool_name"] as? String != "AskUserQuestion":
         let rid = "\(Date().timeIntervalSince1970)"
         status("needs approval")
         writeJSON("request.json", ["id": rid, "tool": h["tool_name"] ?? "", "input": h["tool_input"] ?? [:]])
         while alive(), readJSON("request.json")["id"] as? String == rid {
+            if takeStop() {
+                rm("request.json"); status("stopped")
+                reply(["hookSpecificOutput": ["hookEventName": "PermissionRequest",
+                       "decision": ["behavior": "deny", "message": stopped, "interrupt": true]]])
+            }
             let r = readJSON("response.json")
             if r["id"] as? String == rid, let b = r["behavior"] as? String {
                 rm("request.json"); rm("response.json"); status("working")
@@ -237,7 +255,7 @@ func runHook() -> Never {
         if readJSON("request.json")["id"] as? String == rid { rm("request.json") }  // window closed: normal prompt
     case "Stop":
         status("waiting for instruction")
-        while alive(), mine() {
+        while alive(), mine(), !takeStop() {
             if let msg = takeInbox() {
                 status("working")
                 reply(["hookSpecificOutput": ["hookEventName": "Stop",

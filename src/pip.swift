@@ -27,6 +27,7 @@ func debugLog(_ msg: String) {
 final class Panel: NSPanel {
     var onEscape: () -> Void = {}
     override func cancelOperation(_ sender: Any?) { onEscape() }
+    override var canBecomeKey: Bool { true }  // lets the borderless notch panel take typing
 }
 
 func writeJSON(_ n: String, _ o: [String: Any]) {
@@ -67,6 +68,258 @@ func tail(_ path: String) -> String {
     return out.suffix(30).joined(separator: "\n\n")
 }
 
+// MARK: notch mode: a cute agent living in the MacBook notch. Hover to open it: status, approvals, chat box.
+
+final class Flipped: NSView { override var isFlipped: Bool { true } }
+
+final class Tap: NSView {
+    var onClick: () -> Void = {}
+    override func mouseDown(with e: NSEvent) { onClick() }
+    override func acceptsFirstMouse(for e: NSEvent?) -> Bool { true }
+}
+
+@MainActor final class Notch: NSObject {
+    unowned let app: App
+    let panel = Panel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+    let bg = NSView(), content = Flipped(), tap = Tap()
+    // head (the agent's body) > face (mood animations) > gaze (follows the mouse) > eyes (blink)
+    let head = CALayer(), face = CALayer(), gaze = CALayer(), eyes = [CALayer(), CALayer()], dot = CALayer()
+    let title = NSTextField(labelWithString: ""), info = NSTextField(wrappingLabelWithString: "")
+    let chat = NSTextField()
+    let approve: NSButton, decline: NSButton, stop: NSButton, back: NSButton
+    var hovering = false, expanded = false, popUntil = Date.distantPast, reactUntil = Date.distantPast
+    var lastStatus = "", mood = "", reaction = ""
+    var status = "", note: String?, request: String?, last = ""
+
+    // The built-in display (the one with a notch), else the main one.
+    var screen: NSScreen { NSScreen.screens.first { $0.safeAreaInsets.top > 0 } ?? NSScreen.main ?? NSScreen.screens[0] }
+    var strip: CGFloat { max(screen.safeAreaInsets.top, NSStatusBar.system.thickness) }
+    var notchWidth: CGFloat {
+        guard let l = screen.auxiliaryTopLeftArea, let r = screen.auxiliaryTopRightArea else { return 110 }
+        return screen.frame.width - l.width - r.width
+    }
+
+    init(app: App) {
+        self.app = app
+        approve = NSButton(title: "Approve", target: app, action: #selector(App.approve))
+        decline = NSButton(title: "Decline", target: app, action: #selector(App.decline))
+        stop = NSButton(title: "Stop", target: app, action: #selector(App.stopClaude))
+        back = NSButton(title: "Window", target: app, action: #selector(App.toggleNotch))
+        super.init()
+        approve.bezelColor = .systemGreen
+        stop.bezelColor = .systemRed
+        back.toolTip = "Switch back to the floating window"
+        chat.placeholderString = "Message Claude… (Enter to send)"
+        chat.target = self
+        chat.action = #selector(sendChat)
+        chat.focusRingType = .none
+
+        panel.level = .statusBar  // above the menu bar, where the notch is
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.acceptsMouseMovedEvents = true
+        panel.onEscape = { [unowned self] in chat.stringValue = ""; panel.makeFirstResponder(nil) }
+        panel.contentView = bg
+        bg.wantsLayer = true
+        bg.layer?.backgroundColor = NSColor.black.cgColor
+        bg.layer?.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]  // round the bottom only
+        content.frame = bg.bounds
+        content.autoresizingMask = [.width, .height]
+        content.wantsLayer = true
+        bg.addSubview(content)
+
+        head.cornerRadius = 22
+        for e in eyes { e.cornerRadius = 3.5; gaze.addSublayer(e) }
+        face.addSublayer(gaze)
+        head.addSublayer(face)
+        dot.cornerRadius = 4
+        content.layer?.addSublayer(head)
+        content.layer?.addSublayer(dot)
+        tap.onClick = { [unowned self] in react() }
+        tap.toolTip = "Poke me!"
+
+        title.font = .boldSystemFont(ofSize: 13)
+        title.textColor = .white
+        info.font = .systemFont(ofSize: 11)
+        info.textColor = NSColor.white.withAlphaComponent(0.72)
+        info.maximumNumberOfLines = 2
+        info.lineBreakMode = .byTruncatingTail
+        for v in [title, info, approve, decline, stop, back, chat, tap] as [NSView] { content.addSubview(v) }
+
+        // Mouse tracking (no permissions needed for mouse moves): hover opens the notch, eyes follow the cursor.
+        NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { _ in MainActor.assumeIsolated { self.mouseMoved() } }
+        NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { e in self.mouseMoved(); return e }
+        Timer.scheduledTimer(withTimeInterval: 3.3, repeats: true) { _ in MainActor.assumeIsolated { self.blink() } }
+    }
+
+    func show() { expanded = false; place(animated: false); panel.orderFrontRegardless() }
+    func hide() { panel.orderOut(nil) }
+
+    func place(animated: Bool) {
+        let w = expanded ? max(notchWidth + 120, 440) : notchWidth + 90
+        let h = expanded ? strip + 140 : strip
+        let f = screen.frame
+        let frame = NSRect(x: f.midX - w / 2, y: f.maxY - h, width: w, height: h)
+        let x0: CGFloat = 104, cw = w - x0 - 16
+
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(animated ? 0.25 : 0)
+        bg.layer?.cornerRadius = expanded ? 20 : 10
+        // Small eyes in the notch's left "ear" when closed; a bigger head on the left when open.
+        let (ew, eh, gap): (CGFloat, CGFloat, CGFloat) = expanded ? (12, 22, 22) : (7, 12, 13)
+        head.frame = expanded ? CGRect(x: 18, y: strip + 12, width: 72, height: 72) : CGRect(x: 14, y: 0, width: 30, height: strip)
+        head.backgroundColor = NSColor(white: expanded ? 0.16 : 0, alpha: expanded ? 1 : 0).cgColor
+        face.frame = head.bounds
+        gaze.frame = CGRect(x: (head.bounds.width - ew * 2 - gap) / 2, y: (head.bounds.height - eh) / 2,
+                            width: ew * 2 + gap, height: eh)
+        for (i, e) in eyes.enumerated() {
+            e.frame = CGRect(x: CGFloat(i) * (ew + gap), y: 0, width: ew, height: eh)
+            e.cornerRadius = ew / 2
+        }
+        dot.frame = CGRect(x: w - 30, y: strip / 2 - 4, width: 8, height: 8)
+        CATransaction.commit()
+
+        tap.frame = NSRect(origin: head.frame.origin, size: head.frame.size)
+        title.frame = NSRect(x: x0, y: strip + 10, width: cw, height: 18)
+        info.frame = NSRect(x: x0, y: strip + 30, width: cw, height: 30)
+        approve.frame = NSRect(x: x0 - 4, y: strip + 62, width: 92, height: 28)
+        decline.frame = NSRect(x: x0 + 90, y: strip + 62, width: 92, height: 28)
+        stop.frame = NSRect(x: x0 - 4, y: strip + 62, width: 92, height: 28)
+        back.frame = NSRect(x: w - 96, y: strip + 62, width: 84, height: 28)
+        chat.frame = NSRect(x: 18, y: strip + 100, width: w - 36, height: 26)
+        if !expanded { [title, info, approve, decline, stop, back, chat].forEach { $0.isHidden = true } }
+        panel.hasShadow = expanded
+        if animated {
+            NSAnimationContext.runAnimationGroup { $0.duration = 0.25; panel.animator().setFrame(frame, display: true) }
+        } else {
+            panel.setFrame(frame, display: true)
+        }
+    }
+
+    // Called every tick with the session state.
+    func update(status st: String, note: String?, request: String?, last: String) {
+        if st != lastStatus, st.hasPrefix("waiting"), !lastStatus.isEmpty { popUntil = Date().addingTimeInterval(5) }  // done!
+        lastStatus = st
+        status = st; self.note = note; self.request = request; self.last = last
+        refresh()
+    }
+
+    func refresh() {
+        let m = request != nil ? "approval" : ["working", "stopping"].contains(status) ? "working"
+            : status.hasPrefix("waiting") ? "waiting" : "idle"
+        setMood(m)
+        title.stringValue = Date() < reactUntil ? reaction : note ?? [
+            "approval": "Claude needs your OK 👀", "working": "Working on it…",
+            "waiting": "Done! What's next? ✨", "idle": "Napping… 💤"][m]!
+        info.stringValue = request ?? last
+        let typing = panel.isKeyWindow && chat.currentEditor() != nil
+        let open = hovering || typing || request != nil || Date() < popUntil
+        if open != expanded { expanded = open; place(animated: true) }
+        guard expanded else { return }
+        [title, info, back, chat].forEach { $0.isHidden = false }
+        approve.isHidden = request == nil
+        decline.isHidden = request == nil
+        stop.isHidden = request != nil || m != "working"
+    }
+
+    func mouseMoved() {
+        guard panel.isVisible else { return }
+        let p = NSEvent.mouseLocation
+        let h = panel.frame.insetBy(dx: -10, dy: -10).contains(p)
+        if h != hovering { hovering = h; refresh() }
+        // Eyes follow the cursor (unless busy looking around or bouncing).
+        guard mood == "waiting" || mood == "idle" else { return }
+        let c = panel.convertPoint(toScreen: content.convert(NSPoint(x: head.frame.midX, y: head.frame.midY), to: nil))
+        let dx = p.x - c.x, dy = p.y - c.y, d = max(hypot(dx, dy), 1), k = min(d / 150, 1) * (expanded ? 5 : 2.5)
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.12)
+        gaze.transform = CATransform3DMakeTranslation(dx / d * k, -dy / d * k, 0)  // content is flipped
+        CATransaction.commit()
+    }
+
+    @objc func sendChat() {
+        let t = chat.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        app.queue(t)
+        chat.stringValue = ""
+        panel.makeFirstResponder(nil)
+        say("Got it! On my way 🚀")
+    }
+
+    func say(_ s: String) { reaction = s; reactUntil = Date().addingTimeInterval(2.5); refresh() }
+
+    // Poke the agent: it hops, squints happily and sends a heart.
+    func react() {
+        say(["Hehe, that tickles! 😆", "Boop! 👉👈", "I'm on it, boss! 💪", "Need anything? 💬",
+             "Beep boop 🤖", "You're doing great! 🌟"].randomElement()!)
+        let hop = CAKeyframeAnimation(keyPath: "transform.translation.y")
+        hop.values = [0, -9, 0, -4, 0]
+        hop.keyTimes = [0, 0.3, 0.55, 0.75, 1]
+        hop.duration = 0.6
+        head.add(hop, forKey: "hop")
+        let squint = CAKeyframeAnimation(keyPath: "transform.scale.y")
+        squint.values = [1, 0.25, 0.25, 1]
+        squint.keyTimes = [0, 0.15, 0.8, 1]
+        squint.duration = 0.8
+        eyes.forEach { $0.add(squint, forKey: "squint") }
+
+        let heart = CALayer()
+        heart.contents = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { r in
+            ("💖" as NSString).draw(in: r, withAttributes: [.font: NSFont.systemFont(ofSize: 14)]); return true
+        }
+        heart.frame = CGRect(x: head.frame.maxX - 16, y: head.frame.minY, width: 18, height: 18)
+        content.layer?.addSublayer(heart)
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(1.1)
+        CATransaction.setCompletionBlock { heart.removeFromSuperlayer() }
+        heart.position.y -= expanded ? 34 : 0
+        heart.position.x += 6
+        heart.opacity = 0
+        CATransaction.commit()
+    }
+
+    func setMood(_ m: String) {
+        guard m != mood else { return }
+        mood = m
+        let color: NSColor = ["approval": .systemOrange, "waiting": .systemGreen, "working": .white][m] ?? .gray
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        for e in eyes {
+            e.backgroundColor = color.cgColor
+            e.transform = CATransform3DMakeScale(1, m == "idle" ? 0.3 : 1, 1)  // sleepy when idle
+        }
+        dot.backgroundColor = color.cgColor
+        gaze.transform = CATransform3DIdentity
+        CATransaction.commit()
+        face.removeAllAnimations()
+        let a: CABasicAnimation
+        switch m {
+        case "working":  // looks around while it thinks
+            a = CABasicAnimation(keyPath: "transform.translation.x")
+            a.fromValue = -3; a.toValue = 3; a.duration = 0.9
+        case "approval":  // bounces for attention
+            a = CABasicAnimation(keyPath: "transform.translation.y")
+            a.fromValue = 0; a.toValue = 3; a.duration = 0.22
+        default:
+            return
+        }
+        a.autoreverses = true
+        a.repeatCount = .infinity
+        a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        face.add(a, forKey: "mood")
+    }
+
+    func blink() {
+        guard mood != "idle" else { return }
+        let b = CAKeyframeAnimation(keyPath: "transform.scale.y")
+        b.values = [1, 0.1, 1]
+        b.duration = 0.18
+        eyes.forEach { $0.add(b, forKey: "blink") }
+    }
+}
+
 @MainActor final class App: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDelegate {
     let panel = Panel(contentRect: NSRect(x: 0, y: 0, width: 380, height: 480),
                         styleMask: [.titled, .closable, .resizable, .utilityWindow, .nonactivatingPanel],
@@ -81,6 +334,8 @@ func tail(_ path: String) -> String {
     var inputHeight: NSLayoutConstraint!
     var reqID = "", answered = "", lastLog = "", note = ""
     var noteUntil = Date.distantPast
+    lazy var notch = Notch(app: self)
+    var notchMode = false
 
     func applicationDidFinishLaunching(_ n: Notification) {
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -127,13 +382,19 @@ func tail(_ path: String) -> String {
         let row = NSStackView(views: [inputScroll, NSButton(title: "Send", target: self, action: #selector(send)), stop])
         row.alignment = .bottom
 
-        let stack = NSStackView(views: [status, scroll, reqBox, row])
+        let toggle = NSButton(title: "Notch", target: self, action: #selector(toggleNotch))
+        toggle.toolTip = "Hide this window and live in the MacBook notch instead"
+        let top = NSStackView(views: [status, toggle])
+        top.alignment = .top
+        status.setContentHuggingPriority(.init(1), for: .horizontal)
+        status.setContentCompressionResistancePriority(.init(1), for: .horizontal)
+        let stack = NSStackView(views: [top, scroll, reqBox, row])
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.distribution = .fill
         stack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
         panel.contentView = stack
-        for v in [status, scroll, reqBox, row] as [NSView] {
+        for v in [top, scroll, reqBox, row] as [NSView] {
             v.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -20).isActive = true
         }
         reqLabel.widthAnchor.constraint(equalTo: reqBox.widthAnchor).isActive = true
@@ -148,6 +409,7 @@ func tail(_ path: String) -> String {
         debugLog("window opened, pid \(getpid())")
         tick()
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in MainActor.assumeIsolated { self.tick() } }
+        if CommandLine.arguments.contains("--notch") { toggleNotch() }
     }
 
     func tick() {
@@ -177,6 +439,16 @@ func tail(_ path: String) -> String {
         }
         reqID = id
         reqBox.isHidden = id.isEmpty || id == answered
+        if notchMode {
+            notch.update(status: s["status"] as? String ?? "", note: Date() < noteUntil ? note : nil,
+                         request: reqBox.isHidden ? nil : reqLabel.stringValue,
+                         last: lastLog.components(separatedBy: "\n\n").last ?? "")
+        }
+    }
+
+    @objc func toggleNotch() {
+        notchMode.toggle()
+        if notchMode { panel.orderOut(nil); notch.show(); tick() } else { notch.hide(); panel.orderFrontRegardless() }
     }
 
     func respond(_ behavior: String) {
@@ -194,11 +466,15 @@ func tail(_ path: String) -> String {
     @objc func send() {
         let t = input.string.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !t.isEmpty else { return }
-        let old = (try? String(contentsOf: url("inbox.txt"), encoding: .utf8)) ?? ""
-        try? (old + t + "\n").write(to: url("inbox.txt"), atomically: true, encoding: .utf8)
+        queue(t)
         input.string = ""
         fitInput()
         status.stringValue = "✉︎ Sent — Claude picks it up when its current turn ends"
+    }
+
+    func queue(_ t: String) {  // the Stop hook hands it to Claude
+        let old = (try? String(contentsOf: url("inbox.txt"), encoding: .utf8)) ?? ""
+        try? (old + t + "\n").write(to: url("inbox.txt"), atomically: true, encoding: .utf8)
     }
 
     @objc func stopClaude() {

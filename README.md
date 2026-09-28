@@ -38,6 +38,17 @@ A floating window appears in the bottom-right corner of your screen. Drag it any
 | **Stop** (or **Esc**) | Stops the current task right away, including a running command (also cancels a pending approval). Then type your next instruction in the window |
 | **Message box** | **Enter** sends, **Shift+Enter** adds a new line. The box grows as you type |
 
+### 🐣 Notch mode
+
+Click **Notch** in the window to hide it and move into your MacBook's notch instead. A tiny agent lives there:
+
+- 👀 its eyes **look around** while Claude works, **bounce orange** when Claude needs your OK, and turn **green** when it's done
+- 🖱️ **hover over the notch** to open it: status, what Claude just did, Approve / Decline / Stop, and a **chat box** to send instructions
+- 💖 **click the agent** and it reacts
+- click **Window** to go back to the floating window
+
+No notch? It still works: the agent sits at the top center of your screen.
+
 **To go back to normal:** close the window. Claude Code works exactly as before.
 
 ## Good to know

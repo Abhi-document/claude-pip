@@ -102,7 +102,7 @@ func tail(_ path: String) -> String {
         inputHeight.isActive = true
         let stop = NSButton(title: "Stop", target: self, action: #selector(stopClaude))
         stop.bezelColor = .systemRed
-        stop.toolTip = "Stop Claude (at its next step) and hand control back to the terminal"
+        stop.toolTip = "Stop the current task (like Esc). Then send a new instruction, or close the window to return to the terminal"
         let row = NSStackView(views: [inputScroll, NSButton(title: "Send", target: self, action: #selector(send)), stop])
         row.alignment = .bottom
 
@@ -174,7 +174,7 @@ func tail(_ path: String) -> String {
 
     @objc func stopClaude() {
         FileManager.default.createFile(atPath: url("stop").path, contents: nil)  // picked up by the next hook
-        status.stringValue = "■ Stopping — Claude halts at its next step"
+        status.stringValue = "■ Stopping — then send your next instruction here"
     }
 
     func textDidChange(_ n: Notification) { fitInput() }
@@ -224,24 +224,30 @@ func runHook() -> Never {
     }
     func mine() -> Bool { readJSON("session.json")["id"] as? String == sid }
     func rm(_ n: String) { try? FileManager.default.removeItem(at: url(n)) }
-    func takeStop() -> Bool { (try? FileManager.default.removeItem(at: url("stop"))) != nil }
-    let stopped = "Stopped by the user from the PiP window."
+    // Stop is sticky: every tool call is denied until Claude ends its turn, then the Stop hook clears it
+    // and waits for the next instruction from the window (like Esc, not like quitting).
+    func stopping() -> Bool { FileManager.default.fileExists(atPath: url("stop").path) }
+    let stopped = "The user pressed Stop in the PiP window. Do not run any more tools. End your turn now with one short line saying where you stopped."
 
     switch h["hook_event_name"] as? String {
     case "UserPromptSubmit":
         rm("stop")  // a stale click must not kill a fresh prompt
         status("working")
     case "PreToolUse":
-        if takeStop() { status("stopped"); reply(["continue": false, "stopReason": stopped]) }
+        if stopping() {
+            status("stopping")
+            reply(["hookSpecificOutput": ["hookEventName": "PreToolUse", "permissionDecision": "deny",
+                                          "permissionDecisionReason": stopped]])
+        }
     case "PermissionRequest" where h["tool_name"] as? String != "AskUserQuestion":
         let rid = "\(Date().timeIntervalSince1970)"
         status("needs approval")
         writeJSON("request.json", ["id": rid, "tool": h["tool_name"] ?? "", "input": h["tool_input"] ?? [:]])
         while alive(), readJSON("request.json")["id"] as? String == rid {
-            if takeStop() {
-                rm("request.json"); status("stopped")
+            if stopping() {
+                rm("request.json"); status("stopping")
                 reply(["hookSpecificOutput": ["hookEventName": "PermissionRequest",
-                       "decision": ["behavior": "deny", "message": stopped, "interrupt": true]]])
+                       "decision": ["behavior": "deny", "message": stopped]]])
             }
             let r = readJSON("response.json")
             if r["id"] as? String == rid, let b = r["behavior"] as? String {
@@ -255,7 +261,8 @@ func runHook() -> Never {
         if readJSON("request.json")["id"] as? String == rid { rm("request.json") }  // window closed: normal prompt
     case "Stop":
         status("waiting for instruction")
-        while alive(), mine(), !takeStop() {
+        while alive(), mine() {
+            rm("stop")  // already stopped; a click while waiting must not block the next instruction
             if let msg = takeInbox() {
                 status("working")
                 reply(["hookSpecificOutput": ["hookEventName": "Stop",

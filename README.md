@@ -35,14 +35,14 @@ A floating window appears in the bottom-right corner of your screen. Drag it any
 |---|---|
 | **● status** | `working`, `needs approval` (plays a sound), or `waiting for instruction` |
 | **Approve / Decline** | Answers Claude's permission request. Type a reason in the box before clicking Decline and Claude sees it |
-| **Stop** | Stops Claude at its next step (or cancels a pending approval) and hands control back to the terminal, without closing the window |
+| **Stop** | Stops the current task, like pressing Esc (also cancels a pending approval). Then type your next instruction in the window |
 | **Message box** | **Enter** sends, **Shift+Enter** adds a new line. The box grows as you type |
 
 **To go back to normal:** close the window. Claude Code works exactly as before.
 
 ## Good to know
 
-- While the window is open, Claude waits for your next instruction **from the window**. Press **Stop** (or close the window) to type in the terminal again.
+- While the window is open, Claude waits for your next instruction **from the window**. Close the window to type in the terminal again.
 - **Stop** can't cut off a command that's already running; Claude halts right after it.
 - It follows one session at a time: whichever session was active most recently.
 - Questions Claude asks you (multiple choice) still appear in the terminal.

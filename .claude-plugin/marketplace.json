@@ -1,0 +1,15 @@
+{
+  "name": "abhi.document",
+  "description": "Claude Code on macOS as a floating picture-in-picture window",
+  "owner": {
+    "name": "Digital with Aakriti",
+    "email": "support@digitalwithaakriti.com"
+  },
+  "plugins": [
+    {
+      "name": "abhi.document",
+      "source": "./",
+      "description": "Floating picture-in-picture window for your Claude Code session (macOS)"
+    }
+  ]
+}

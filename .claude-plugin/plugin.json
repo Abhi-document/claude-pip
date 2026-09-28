@@ -1,6 +1,6 @@
 {
   "name": "abhi.document",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "description": "Picture-in-picture window for Claude Code on macOS: watch your session, approve/decline, and send instructions from a floating window while you work in other apps.",
   "author": {
     "name": "Digital with Aakriti",

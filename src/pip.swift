@@ -28,6 +28,17 @@ final class Panel: NSPanel {
     var onEscape: () -> Void = {}
     override func cancelOperation(_ sender: Any?) { onEscape() }
     override var canBecomeKey: Bool { true }  // lets the borderless notch panel take typing
+
+    // There's no menu bar (accessory app), so the standard editing shortcuts are wired up here.
+    override func performKeyEquivalent(with e: NSEvent) -> Bool {
+        let mods = e.modifierFlags.intersection([.command, .shift, .option, .control])
+        let key = (mods == [.command, .shift] ? "⇧" : mods == .command ? "" : "✗") + (e.charactersIgnoringModifiers ?? "")
+        let action: Selector? = ["v": #selector(NSText.paste(_:)), "c": #selector(NSText.copy(_:)),
+                                 "x": #selector(NSText.cut(_:)), "a": #selector(NSText.selectAll(_:)),
+                                 "z": Selector(("undo:")), "⇧z": Selector(("redo:"))][key.lowercased()]
+        if let action, NSApp.sendAction(action, to: nil, from: self) { return true }
+        return super.performKeyEquivalent(with: e)
+    }
 }
 
 func writeJSON(_ n: String, _ o: [String: Any]) {
@@ -87,7 +98,7 @@ final class Tap: NSView {
     let title = NSTextField(labelWithString: ""), info = NSTextField(wrappingLabelWithString: "")
     let chat = NSTextField()
     let approve: NSButton, decline: NSButton, stop: NSButton, back: NSButton
-    var hovering = false, expanded = false, popUntil = Date.distantPast, reactUntil = Date.distantPast
+    var hovering = false, ghost = false, expanded = false, popUntil = Date.distantPast, reactUntil = Date.distantPast
     var lastStatus = "", mood = "", reaction = ""
     var status = "", note: String?, request: String?, last = ""
 
@@ -154,7 +165,13 @@ final class Tap: NSView {
         Timer.scheduledTimer(withTimeInterval: 3.3, repeats: true) { _ in MainActor.assumeIsolated { self.blink() } }
     }
 
-    func show() { expanded = false; place(animated: false); panel.orderFrontRegardless() }
+    func show() {
+        expanded = false
+        place(animated: false)
+        panel.ignoresMouseEvents = true
+        panel.alphaValue = 1
+        panel.orderFrontRegardless()
+    }
     func hide() { panel.orderOut(nil) }
 
     func place(animated: Bool) {
@@ -216,7 +233,12 @@ final class Tap: NSView {
         info.stringValue = request ?? last
         let typing = panel.isKeyWindow && chat.currentEditor() != nil
         let open = hovering || typing || request != nil || Date() < popUntil
-        if open != expanded { expanded = open; place(animated: true) }
+        if open != expanded {
+            expanded = open
+            place(animated: true)
+            panel.ignoresMouseEvents = !open  // closed: clicks pass through to the menu bar under it
+            fade()
+        }
         guard expanded else { return }
         [title, info, back, chat].forEach { $0.isHidden = false }
         approve.isHidden = request == nil
@@ -227,8 +249,14 @@ final class Tap: NSView {
     func mouseMoved() {
         guard panel.isVisible else { return }
         let p = NSEvent.mouseLocation
-        let h = panel.frame.insetBy(dx: -10, dy: -10).contains(p)
+        // Closed, only the notch itself (and just below it) opens it, not the menu bar beside it.
+        let f = screen.frame
+        let hot = expanded ? panel.frame.insetBy(dx: -10, dy: -10)
+            : NSRect(x: f.midX - notchWidth / 2, y: f.maxY - strip - 12, width: notchWidth, height: strip + 12)
+        let h = hot.contains(p)
         if h != hovering { hovering = h; refresh() }
+        let g = !expanded && panel.frame.contains(p)
+        if g != ghost { ghost = g; fade() }
         // Eyes follow the cursor (unless busy looking around or bouncing).
         guard mood == "waiting" || mood == "idle" else { return }
         let c = panel.convertPoint(toScreen: content.convert(NSPoint(x: head.frame.midX, y: head.frame.midY), to: nil))
@@ -246,6 +274,13 @@ final class Tap: NSView {
         chat.stringValue = ""
         panel.makeFirstResponder(nil)
         say("Got it! On my way 🚀")
+    }
+
+    // Solid, except 80% transparent while the cursor is over the closed pill (to see the menu bar under it).
+    func fade() {
+        let a: CGFloat = ghost && !expanded ? 0.2 : 1
+        guard panel.alphaValue != a else { return }
+        NSAnimationContext.runAnimationGroup { $0.duration = 0.2; panel.animator().alphaValue = a }
     }
 
     func say(_ s: String) { reaction = s; reactUntil = Date().addingTimeInterval(2.5); refresh() }

@@ -44,6 +44,7 @@ Click **Notch** in the window (or open it with `/pip notch`) to hide it and move
 
 - 👀 its eyes **look around** while Claude works, **bounce orange** when Claude needs your OK, and turn **green** when it's done
 - 🖱️ **hover over the notch** to open it: status, what Claude just did, Approve / Decline / Stop, and a **chat box** to send instructions
+- 👻 move over the pill beside the notch and it turns see-through, so the menu bar items under it stay clickable
 - 💖 **click the agent** and it reacts
 - click **Window** to go back to the floating window
 

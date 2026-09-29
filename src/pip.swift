@@ -81,24 +81,158 @@ func tail(_ path: String) -> (log: String, reply: String) {
     return (out.suffix(30).joined(separator: "\n\n"), reply)
 }
 
+// Parent of a process (0 if unknown).
+func parentPID(_ pid: pid_t) -> pid_t {
+    var info = kinfo_proc(), size = MemoryLayout<kinfo_proc>.stride
+    var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+    return sysctl(&mib, 4, &info, &size, nil, 0) == 0 ? info.kp_eproc.e_ppid : 0
+}
+
+// The app the Claude process runs in (VS Code, Terminal, iTerm…): its first ancestor with a Dock icon.
+func hostApp(of pid: pid_t) -> NSRunningApplication? {
+    var p = pid
+    for _ in 0..<16 where p > 1 {
+        if let a = NSRunningApplication(processIdentifier: p), a.activationPolicy == .regular { return a }
+        p = parentPID(p)
+    }
+    return nil
+}
+
 // MARK: notch mode: a cute agent living in the MacBook notch. Hover to open it: status, approvals, chat box.
 
 final class Flipped: NSView { override var isFlipped: Bool { true } }
 
 final class Tap: NSView {
-    var onClick: (NSPoint) -> Void = { _ in }
+    var onClick: (NSPoint, Int) -> Void = { _, _ in }  // point, click count
     var hand = false
-    override func mouseDown(with e: NSEvent) { onClick(convert(e.locationInWindow, from: nil)) }
+    override func mouseDown(with e: NSEvent) { onClick(convert(e.locationInWindow, from: nil), e.clickCount) }
     override func resetCursorRects() { if hand { addCursorRect(bounds, cursor: .pointingHand) } }
     override func acceptsFirstMouse(for e: NSEvent?) -> Bool { true }
+}
+
+// A cartoon human eye: white eyeball, colored iris with pupil and sparkle, eyelids, a brow and a blush.
+// Animation notes: brows travel with the lids and a beat apart from each other; blinks close fast, hold,
+// and open slower; gaze moves in quick saccades with holds (not smooth sweeps).
+@MainActor final class Eye {
+    let side: CGFloat                             // -1 left eye, +1 right eye
+    let ball = CALayer()                          // the white of the eye; clips everything inside
+    let iris = CALayer(), pupil = CALayer(), glint = CALayer()
+    let lid = CALayer()                           // top lid: its bottom edge slides down to blink or close
+    let lower = CAShapeLayer()                    // bottom lid: curves up for smiling eyes
+    let lash = CAShapeLayer()                     // lash line, shown when closed
+    let brow = CAShapeLayer(), blush = CALayer()  // outside the eyeball (open notch only)
+
+    init(side: CGFloat) {
+        self.side = side
+        ball.masksToBounds = true
+        ball.backgroundColor = NSColor(white: 0.97, alpha: 1).cgColor
+        pupil.backgroundColor = NSColor.black.cgColor
+        glint.backgroundColor = NSColor.white.cgColor
+        iris.addSublayer(pupil)
+        iris.addSublayer(glint)
+        lid.anchorPoint = CGPoint(x: 0.5, y: 1)
+        lash.fillColor = nil
+        lash.lineCap = .round
+        lash.strokeColor = NSColor(white: 0.8, alpha: 1).cgColor
+        for l in [iris, lid, lower, lash] as [CALayer] { ball.addSublayer(l) }
+        brow.fillColor = nil
+        brow.lineCap = .round
+        brow.strokeColor = NSColor(white: 0.9, alpha: 1).cgColor
+        blush.backgroundColor = NSColor.systemPink.withAlphaComponent(0.55).cgColor
+        blush.opacity = 0
+    }
+
+    func layout(width w: CGFloat, height h: CGFloat, skin: CGColor, at c: CGPoint, extras: Bool) {
+        ball.bounds = CGRect(x: 0, y: 0, width: w, height: h)
+        ball.cornerRadius = w / 2
+        ball.position = c
+        let d = w * 0.66
+        iris.bounds = CGRect(x: 0, y: 0, width: d, height: d)
+        iris.cornerRadius = d / 2
+        iris.position = CGPoint(x: w / 2, y: h / 2)
+        pupil.bounds = CGRect(x: 0, y: 0, width: d * 0.46, height: d * 0.46)
+        pupil.cornerRadius = d * 0.23
+        pupil.position = CGPoint(x: d / 2, y: d / 2)
+        glint.bounds = CGRect(x: 0, y: 0, width: d * 0.26, height: d * 0.26)
+        glint.cornerRadius = d * 0.13
+        glint.position = CGPoint(x: d * 0.34, y: d * 0.32)
+        lid.bounds = CGRect(x: 0, y: 0, width: w * 1.8, height: h * 1.4)
+        lid.backgroundColor = skin
+        lower.frame = ball.bounds
+        lower.fillColor = skin
+        lash.frame = ball.bounds
+        lash.lineWidth = max(1.5, w * 0.16)
+        let p = CGMutablePath()
+        p.move(to: CGPoint(x: w * 0.08, y: h * 0.45))
+        p.addQuadCurve(to: CGPoint(x: w * 0.92, y: h * 0.45), control: CGPoint(x: w / 2, y: h * 0.78))
+        lash.path = p
+        brow.bounds = CGRect(x: 0, y: 0, width: w * 1.05, height: h * 0.34)
+        brow.position = CGPoint(x: c.x, y: c.y - h * 0.8)
+        brow.lineWidth = max(1.5, w * 0.12)
+        blush.bounds = CGRect(x: 0, y: 0, width: w * 0.8, height: h * 0.26)
+        blush.cornerRadius = h * 0.13
+        blush.position = CGPoint(x: c.x + side * w * 0.12, y: c.y + h * 0.66)
+        brow.isHidden = !extras
+        blush.isHidden = !extras
+    }
+
+    // open: 0 = lid up, 1 = closed · tilt: lid angle (worried) · wide: surprised · smile: happy lower lid
+    // pupil: dilation (big = delighted, small = startled) · brow: raise, inner-end lift, arch · blushing
+    func set(open: CGFloat, tilt: CGFloat = 0, wide: Bool = false, smile: Bool = false, pupil dilation: CGFloat = 1,
+             color: NSColor, brow b: (raise: CGFloat, inner: CGFloat, arch: CGFloat) = (0, 0, 0.4), blushing: Bool = false) {
+        let w = ball.bounds.width, h = ball.bounds.height
+        lid.position = CGPoint(x: w / 2, y: h * open)
+        lid.transform = CATransform3DMakeRotation(tilt, 0, 0, 1)
+        ball.transform = wide ? CATransform3DMakeScale(1.12, 1.12, 1) : CATransform3DIdentity
+        iris.transform = wide ? CATransform3DMakeScale(0.78, 0.78, 1) : CATransform3DIdentity
+        iris.backgroundColor = color.cgColor
+        pupil.transform = CATransform3DMakeScale(dilation, dilation, 1)
+        lash.opacity = open >= 1 ? 1 : 0
+        let top = smile ? h * 0.9 : h * 1.3, bend = smile ? h * 0.36 : h * 1.3
+        let p = CGMutablePath()
+        p.move(to: CGPoint(x: -w * 0.3, y: h * 1.5))
+        p.addLine(to: CGPoint(x: -w * 0.3, y: top))
+        p.addQuadCurve(to: CGPoint(x: w * 1.3, y: top), control: CGPoint(x: w / 2, y: bend))
+        p.addLine(to: CGPoint(x: w * 1.3, y: h * 1.5))
+        p.closeSubpath()
+        lower.path = p
+        let bw = brow.bounds.width, bh = brow.bounds.height, q = CGMutablePath()
+        q.move(to: CGPoint(x: 0, y: bh * 0.8))
+        q.addQuadCurve(to: CGPoint(x: bw, y: bh * 0.8), control: CGPoint(x: bw / 2, y: bh * 0.8 - bh * 1.3 * b.arch))
+        brow.path = q
+        brow.transform = CATransform3DRotate(CATransform3DMakeTranslation(0, -b.raise * h * 0.1, 0), side * b.inner, 0, 0, 1)
+        blush.opacity = blushing ? 1 : 0
+    }
+
+    // Where the iris looks: x, y in -1...1.
+    func look(_ x: CGFloat, _ y: CGFloat) {
+        let w = ball.bounds.width, h = ball.bounds.height, d = iris.bounds.width
+        iris.position = CGPoint(x: w / 2 + x * (w - d) / 2 * 0.9, y: h / 2 + y * (h - d) / 2 * 0.9)
+    }
+
+    // Fast close, short hold, slower open; the brow dips with the lid.
+    func blink(duration: CFTimeInterval = 0.2) {
+        let b = CAKeyframeAnimation(keyPath: "position.y")
+        b.values = [lid.position.y, ball.bounds.height * 1.02, ball.bounds.height * 1.02, lid.position.y]
+        b.keyTimes = [0, 0.3, 0.42, 1]
+        b.duration = duration
+        lid.add(b, forKey: "blink")
+        let dip = CAKeyframeAnimation(keyPath: "transform.translation.y")
+        dip.values = [0, ball.bounds.height * 0.06, 0]
+        dip.duration = duration
+        dip.isAdditive = true
+        brow.add(dip, forKey: "blink")
+    }
 }
 
 @MainActor final class Notch: NSObject {
     unowned let app: App
     let panel = Panel(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
     let bg = NSView(), content = Flipped(), tap = Tap()
-    // head (the agent's body) > face (mood animations) > gaze (follows the mouse) > eyes (blink)
-    let head = CALayer(), face = CALayer(), gaze = CALayer(), eyes = [CALayer(), CALayer()], dot = CALayer()
+    // head (the agent's body) > face (mood motion) > gaze (holds the eyes) > eyes (lids, irises)
+    let head = CALayer(), face = CALayer(), gaze = CALayer(), eyes = [Eye(side: -1), Eye(side: 1)], dot = CALayer()
+    var pinned = false  // --pin: stay open (demos, screenshots)
+    var zzz: Timer?, awakeUntil = Date.distantPast
     let title = NSTextField(labelWithString: ""), info = NSTextField(wrappingLabelWithString: "")
     let chat = NSTextField()
     let pageTap = Tap(), pageLabel = NSTextField(labelWithString: "")
@@ -132,7 +266,7 @@ final class Tap: NSView {
         chat.focusRingType = .none
         // Click the right half of the reply for the next page, the left half for the previous one.
         pageTap.hand = true
-        pageTap.onClick = { [unowned self] p in p.x < pageTap.bounds.midX ? prevPage() : nextPage() }
+        pageTap.onClick = { [unowned self] p, _ in p.x < pageTap.bounds.midX ? prevPage() : nextPage() }
         pageLabel.textColor = NSColor.white.withAlphaComponent(0.55)
         pageLabel.font = .systemFont(ofSize: 9)
 
@@ -153,14 +287,14 @@ final class Tap: NSView {
         bg.addSubview(content)
 
         head.cornerRadius = 22
-        for e in eyes { e.cornerRadius = 3.5; gaze.addSublayer(e) }
+        for e in eyes { [e.blush, e.ball, e.brow].forEach(gaze.addSublayer) }
         face.addSublayer(gaze)
         head.addSublayer(face)
         dot.cornerRadius = 4
         content.layer?.addSublayer(head)
         content.layer?.addSublayer(dot)
-        tap.onClick = { [unowned self] _ in react() }
-        tap.toolTip = "Poke me!"
+        tap.onClick = { [unowned self] _, clicks in mood == "idle" && clicks >= 2 ? wake() : react() }
+        tap.toolTip = "Poke me! (double-click to wake me up)"
 
         title.font = .boldSystemFont(ofSize: 13)
         title.textColor = .white
@@ -176,7 +310,9 @@ final class Tap: NSView {
         // Mouse tracking (no permissions needed for mouse moves): hover opens the notch, eyes follow the cursor.
         NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { _ in MainActor.assumeIsolated { self.mouseMoved() } }
         NSEvent.addLocalMonitorForEvents(matching: .mouseMoved) { e in self.mouseMoved(); return e }
-        Timer.scheduledTimer(withTimeInterval: 3.3, repeats: true) { _ in MainActor.assumeIsolated { self.blink() } }
+        scheduleBlink()
+        scheduleGaze()
+        breathe()
     }
 
     func show() {
@@ -199,16 +335,18 @@ final class Tap: NSView {
         CATransaction.setAnimationDuration(animated ? 0.25 : 0)
         bg.layer?.cornerRadius = expanded ? 20 : 10
         // Small eyes in the notch's left "ear" when closed; a bigger head on the left when open.
-        let (ew, eh, gap): (CGFloat, CGFloat, CGFloat) = expanded ? (12, 22, 22) : (7, 12, 13)
+        let (ew, eh, gap): (CGFloat, CGFloat, CGFloat) = expanded ? (22, 26, 7) : (10, 13, 4)
         head.frame = expanded ? CGRect(x: 18, y: strip + 12, width: 72, height: 72) : CGRect(x: 14, y: 0, width: 30, height: strip)
         head.backgroundColor = NSColor(white: expanded ? 0.16 : 0, alpha: expanded ? 1 : 0).cgColor
         face.frame = head.bounds
-        gaze.frame = CGRect(x: (head.bounds.width - ew * 2 - gap) / 2, y: (head.bounds.height - eh) / 2,
-                            width: ew * 2 + gap, height: eh)
+        gaze.bounds = CGRect(x: 0, y: 0, width: ew * 2 + gap, height: eh)  // gaze carries the mouse-follow transform
+        gaze.position = CGPoint(x: head.bounds.midX, y: head.bounds.midY - (expanded ? 6 : 0))
+        let skin = NSColor(white: expanded ? 0.16 : 0, alpha: 1).cgColor  // eyelids match the face around them
         for (i, e) in eyes.enumerated() {
-            e.frame = CGRect(x: CGFloat(i) * (ew + gap), y: 0, width: ew, height: eh)
-            e.cornerRadius = ew / 2
+            e.layout(width: ew, height: eh, skin: skin, at: CGPoint(x: CGFloat(i) * (ew + gap) + ew / 2, y: eh / 2),
+                     extras: expanded)
         }
+        express()
         dot.frame = CGRect(x: w - 30, y: strip / 2 - 4, width: 8, height: 8)
         CATransaction.commit()
 
@@ -242,17 +380,19 @@ final class Tap: NSView {
     }
 
     func refresh() {
-        let m = request != nil ? "approval" : ["working", "stopping"].contains(status) ? "working"
-            : status.hasPrefix("waiting") ? "waiting" : "idle"
+        let m = request != nil ? "approval" : status == "working" ? "working" : status == "stopping" ? "stopping"
+            : status.hasPrefix("waiting") ? "waiting" : Date() < awakeUntil ? "awake" : "idle"
         setMood(m)
         title.stringValue = Date() < reactUntil ? reaction : note ?? [
             "approval": "Claude needs your OK 👀", "working": "Working on it…",
-            "waiting": "Done! What's next? ✨", "idle": "Napping… 💤"][m]!
+            "waiting": "Done! What's next? ✨", "stopping": "Stopping… 😟",
+            "awake": "I'm up! ☀️ Type anything in Claude to reconnect me",
+            "idle": "Napping… 💤 double-click me to wake up"][m]!
         // Done: Claude's reply, a page at a time. Otherwise: the request, or what Claude is doing.
         let talking = m == "waiting" && !pages.isEmpty
         show(request ?? (talking ? pages[page] : last), typed: talking)
         let typing = panel.isKeyWindow && chat.currentEditor() != nil
-        let open = hovering || typing || request != nil || Date() < popUntil
+        let open = pinned || hovering || typing || request != nil || Date() < popUntil
         if open != expanded {
             expanded = open
             place(animated: true)
@@ -321,13 +461,13 @@ final class Tap: NSView {
         if h != hovering { hovering = h; refresh() }
         let g = !expanded && panel.frame.contains(p)
         if g != ghost { ghost = g; fade() }
-        // Eyes follow the cursor (unless busy looking around or bouncing).
-        guard mood == "waiting" || mood == "idle" else { return }
+        // Irises follow the cursor when the agent is looking at you (it glances away now and then).
+        guard followCursor, Date() > glanceUntil else { return }
         let c = panel.convertPoint(toScreen: content.convert(NSPoint(x: head.frame.midX, y: head.frame.midY), to: nil))
-        let dx = p.x - c.x, dy = p.y - c.y, d = max(hypot(dx, dy), 1), k = min(d / 150, 1) * (expanded ? 5 : 2.5)
+        let dx = p.x - c.x, dy = p.y - c.y, d = max(hypot(dx, dy), 1), k = min(d / 200, 1)
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.12)
-        gaze.transform = CATransform3DMakeTranslation(dx / d * k, -dy / d * k, 0)  // content is flipped
+        eyes.forEach { $0.look(dx / d * k, -dy / d * k) }  // content is flipped
         CATransaction.commit()
     }
 
@@ -358,64 +498,195 @@ final class Tap: NSView {
         hop.keyTimes = [0, 0.3, 0.55, 0.75, 1]
         hop.duration = 0.6
         head.add(hop, forKey: "hop")
-        let squint = CAKeyframeAnimation(keyPath: "transform.scale.y")
-        squint.values = [1, 0.25, 0.25, 1]
-        squint.keyTimes = [0, 0.15, 0.8, 1]
-        squint.duration = 0.8
-        eyes.forEach { $0.add(squint, forKey: "squint") }
+        eyes.forEach {  // delighted for a moment: smiling eyes, big pupils, raised brows, blush
+            $0.set(open: 0, smile: true, pupil: 1.35, color: .systemPink, brow: (2.5, 0.1, 0.9), blushing: true)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [self] in express() }
 
         let heart = CALayer()
         heart.contents = NSImage(size: NSSize(width: 18, height: 18), flipped: false) { r in
             ("💖" as NSString).draw(in: r, withAttributes: [.font: NSFont.systemFont(ofSize: 14)]); return true
         }
         heart.frame = CGRect(x: head.frame.maxX - 16, y: head.frame.minY, width: 18, height: 18)
-        content.layer?.addSublayer(heart)
+        floatAway(heart, dx: 6, dy: expanded ? -34 : -8, duration: 1.1)
+    }
+
+    // Add a layer and let it drift and fade out. Explicit animations: a layer added in the same
+    // transaction wouldn't animate implicitly (it would jump straight to invisible).
+    func floatAway(_ l: CALayer, dx: CGFloat, dy: CGFloat, duration: CFTimeInterval) {
+        content.layer?.addSublayer(l)
+        let move = CABasicAnimation(keyPath: "position")
+        move.fromValue = NSValue(point: l.position)
+        move.toValue = NSValue(point: CGPoint(x: l.position.x + dx, y: l.position.y + dy))
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1
+        fade.toValue = 0
+        let g = CAAnimationGroup()
+        g.animations = [move, fade]
+        g.duration = duration
         CATransaction.begin()
-        CATransaction.setAnimationDuration(1.1)
-        CATransaction.setCompletionBlock { heart.removeFromSuperlayer() }
-        heart.position.y -= expanded ? 34 : 0
-        heart.position.x += 6
-        heart.opacity = 0
+        CATransaction.setCompletionBlock { l.removeFromSuperlayer() }
+        l.opacity = 0
+        l.add(g, forKey: "float")
         CATransaction.commit()
     }
 
+    // Each mood is a look in the eyes (lids, iris color, blink pace) and a motion. The eyes do the talking.
     func setMood(_ m: String) {
         guard m != mood else { return }
         mood = m
-        let color: NSColor = ["approval": .systemOrange, "waiting": .systemGreen, "working": .white][m] ?? .gray
+        let color: NSColor = ["approval": .systemOrange, "waiting": .systemGreen, "working": .white,
+                              "stopping": .systemRed, "awake": .white][m] ?? .gray
         CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        for e in eyes {
-            e.backgroundColor = color.cgColor
-            e.transform = CATransform3DMakeScale(1, m == "idle" ? 0.3 : 1, 1)  // sleepy when idle
-        }
+        CATransaction.setAnimationDuration(0.3)
+        express()
         dot.backgroundColor = color.cgColor
-        gaze.transform = CATransform3DIdentity
         CATransaction.commit()
         face.removeAllAnimations()
-        let a: CABasicAnimation
+        zzz?.invalidate()
+        let a = CAKeyframeAnimation()
         switch m {
-        case "working":  // looks around while it thinks
-            a = CABasicAnimation(keyPath: "transform.translation.x")
-            a.fromValue = -3; a.toValue = 3; a.duration = 0.9
-        case "approval":  // bounces for attention
-            a = CABasicAnimation(keyPath: "transform.translation.y")
-            a.fromValue = 0; a.toValue = 3; a.duration = 0.22
+        case "approval":  // surprise: anticipation squint, pop wide with overshoot, settle; then bounce
+            let pop = CAKeyframeAnimation(keyPath: "transform.scale")
+            pop.values = [1, 0.85, 1.28, 1.12]
+            pop.keyTimes = [0, 0.3, 0.7, 1]
+            pop.duration = 0.35
+            eyes.forEach { $0.ball.add(pop, forKey: "pop") }
+            a.keyPath = "transform.translation.y"; a.values = [0, 3, 0]; a.duration = 0.44
+        case "stopping":  // worried little shake and a sweat drop
+            a.keyPath = "transform.translation.x"; a.values = [0, -2, 2, -2, 2, 0]; a.duration = 0.5
+            let drop = CALayer()
+            drop.contents = NSImage(size: NSSize(width: 14, height: 14), flipped: false) { r in
+                ("💧" as NSString).draw(in: r, withAttributes: [.font: NSFont.systemFont(ofSize: 11)]); return true
+            }
+            drop.frame = CGRect(x: head.frame.maxX - 12, y: head.frame.minY + 2, width: 14, height: 14)
+            floatAway(drop, dx: 2, dy: expanded ? 22 : 6, duration: 1.4)
+        case "waiting":  // happy hop, once
+            a.keyPath = "transform.translation.y"; a.values = [0, -6, 0, -2, 0]; a.duration = 0.6
+            face.add(a, forKey: "mood")
+            return
+        case "idle":  // dozes off: a few heavy, drowsy half-blinks, then sleeps; little z's float up
+            eyes.forEach { e in
+                let h = e.ball.bounds.height, doze = CAKeyframeAnimation(keyPath: "position.y")
+                doze.values = [0.1, 0.65, 0.25, 0.8, 0.45, 1.02].map { $0 * h }
+                doze.keyTimes = [0, 0.2, 0.4, 0.6, 0.8, 1]
+                doze.duration = 2.4
+                e.lid.add(doze, forKey: "doze")
+            }
+            zzz = Timer.scheduledTimer(withTimeInterval: 1.6, repeats: true) { _ in MainActor.assumeIsolated { self.snore() } }
+            return
         default:
             return
         }
-        a.autoreverses = true
         a.repeatCount = .infinity
         a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
         face.add(a, forKey: "mood")
     }
 
-    func blink() {
-        guard mood != "idle" else { return }
-        let b = CAKeyframeAnimation(keyPath: "transform.scale.y")
-        b.values = [1, 0.1, 1]
-        b.duration = 0.18
-        eyes.forEach { $0.add(b, forKey: "blink") }
+    // The look for the current mood: lids, iris color, pupils, brows (the second brow a beat later).
+    func express() {
+        let iris: NSColor = ["approval": .systemOrange, "waiting": .systemGreen, "stopping": .systemRed,
+                             "idle": .gray][mood] ?? .systemBlue
+        for (i, e) in eyes.enumerated() {
+            let apply = {
+                switch self.mood {
+                case "idle":      // asleep: relaxed, low brows
+                    e.set(open: 1, color: iris, brow: (-1, 0, 0.3))
+                case "approval":  // surprised: wide, pinpoint pupils, brows high and arched
+                    e.set(open: -0.05, wide: true, pupil: 0.65, color: iris, brow: (2.2, 0.05, 1))
+                case "waiting":   // happy: smiling eyes, big pupils, soft raised brows, a little blush
+                    e.set(open: 0.05, smile: true, pupil: 1.2, color: iris, brow: (2, 0.05, 0.8), blushing: true)
+                case "stopping":  // worried: droopy lids, inner brow ends up
+                    e.set(open: 0.3, tilt: i == 0 ? -0.3 : 0.3, pupil: 0.85, color: iris, brow: (2, 0.4, 0.2))
+                case "working":   // focused: lids a little low, brows down and drawn in
+                    e.set(open: 0.18, color: iris, brow: (-1.2, -0.22, 0.25))
+                default:          // awake and curious
+                    e.set(open: 0.02, pupil: 1.1, color: iris, brow: (3, 0.1, 0.7))
+                }
+            }
+            if i == 0 { apply() } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { apply() } }
+        }
+    }
+
+    // Gaze in saccades: quick jumps with holds. Working: scanning down and across, like reading.
+    // Needs you / done: looking at you (the cursor), with a glance away now and then. Stopping: nervous darts.
+    var followCursor: Bool { ["approval", "waiting"].contains(mood) }
+    func scheduleGaze() {
+        let (lo, hi): (Double, Double) = ["working": (0.25, 1.1), "stopping": (0.15, 0.45), "awake": (0.3, 0.8)][mood] ?? (3.5, 7)
+        DispatchQueue.main.asyncAfter(deadline: .now() + .random(in: lo...hi)) { [self] in
+            switch mood {
+            case "working": saccade(.random(in: -0.9...0.9), .random(in: -0.1...0.8))
+            case "stopping": saccade(.random(in: -0.9...0.9), .random(in: -0.3...0.3))
+            case "awake": saccade(.random(in: -1...1), .random(in: -0.8...0.5))
+            case "approval", "waiting":  // glance away briefly, then back at you
+                glanceUntil = Date().addingTimeInterval(.random(in: 0.5...1.1))
+                saccade(.random(in: -0.9...0.9), .random(in: -0.6...0.2))
+            default: break
+            }
+            scheduleGaze()
+        }
+    }
+
+    var gazeAt = CGPoint.zero, glanceUntil = Date.distantPast
+    func saccade(_ x: CGFloat, _ y: CGFloat) {
+        let far = hypot(x - gazeAt.x, y - gazeAt.y) > 1
+        gazeAt = CGPoint(x: x, y: y)
+        CATransaction.begin()
+        CATransaction.setAnimationDuration(0.05)  // saccades are fast
+        eyes.forEach { $0.look(x, y) }
+        CATransaction.commit()
+        if far, Double.random(in: 0...1) < 0.3 { eyes.forEach { $0.blink() } }  // big eye jumps often come with a blink
+    }
+
+    // Always a little alive: a slow, subtle breath.
+    func breathe() {
+        let b = CABasicAnimation(keyPath: "transform.scale")
+        b.fromValue = 1
+        b.toValue = 1.025
+        b.duration = 1.8
+        b.autoreverses = true
+        b.repeatCount = .infinity
+        b.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        gaze.add(b, forKey: "breathe")
+    }
+
+    func snore() {
+        let z = CATextLayer()
+        z.string = "z"
+        z.fontSize = expanded ? 14 : 9
+        z.foregroundColor = NSColor.white.withAlphaComponent(0.7).cgColor
+        z.contentsScale = panel.backingScaleFactor
+        z.frame = CGRect(x: head.frame.maxX - (expanded ? 10 : 4), y: head.frame.minY + (expanded ? 4 : 8), width: 14, height: 16)
+        floatAway(z, dx: 8, dy: expanded ? -22 : -10, duration: 1.5)
+    }
+
+    // Double-click while napping: wake up and bring the Claude app forward. An idle Claude session
+    // can't be restarted from outside; one message typed there reconnects the agent.
+    func wake() {
+        awakeUntil = Date().addingTimeInterval(12)
+        refresh()
+        let hop = CAKeyframeAnimation(keyPath: "transform.translation.y")
+        hop.values = [0, -10, 0]
+        hop.duration = 0.4
+        head.add(hop, forKey: "wake")
+        guard let pid = readJSON("session.json")["pid"] as? Int, let host = hostApp(of: pid_t(pid)) else { return }
+        host.activate()
+    }
+
+    // Natural, random blinking whose pace follows the mood; sometimes a double blink.
+    func scheduleBlink() {
+        let (lo, hi, double): (Double, Double, Double) = [
+            "approval": (1.2, 3, 0.5), "stopping": (0.8, 2, 0.35), "waiting": (3, 6, 0.1), "awake": (1, 2.5, 0.3),
+        ][mood] ?? (2.5, 5.5, 0.15)
+        DispatchQueue.main.asyncAfter(deadline: .now() + .random(in: lo...hi)) { [self] in
+            if mood != "idle" {  // asleep: no blinking
+                eyes.forEach { $0.blink() }
+                if Double.random(in: 0...1) < double {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) { [self] in eyes.forEach { $0.blink() } }
+                }
+            }
+            scheduleBlink()
+        }
     }
 }
 
@@ -515,6 +786,7 @@ final class Tap: NSView {
         RunLoop.main.add(Timer(timeInterval: 0.5, repeats: true) { _ in MainActor.assumeIsolated { self.tick() } },
                          forMode: .common)
         if CommandLine.arguments.contains("--notch") { toggleNotch() }
+        if CommandLine.arguments.contains("--pin") { notch.pinned = true; tick() }
     }
 
     func tick() {

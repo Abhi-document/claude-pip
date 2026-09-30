@@ -232,7 +232,7 @@ final class Tap: NSView {
     // head (the agent's body) > face (mood motion) > gaze (holds the eyes) > eyes (lids, irises)
     let head = CALayer(), face = CALayer(), gaze = CALayer(), eyes = [Eye(side: -1), Eye(side: 1)], dot = CALayer()
     var pinned = false  // --pin: stay open (demos, screenshots)
-    var zzz: Timer?, awakeUntil = Date.distantPast
+    var zzz: Timer?, waitingSince = Date()
     let title = NSTextField(labelWithString: ""), info = NSTextField(wrappingLabelWithString: "")
     let chat = NSTextField()
     let pageTap = Tap(), pageLabel = NSTextField(labelWithString: "")
@@ -293,7 +293,7 @@ final class Tap: NSView {
         dot.cornerRadius = 4
         content.layer?.addSublayer(head)
         content.layer?.addSublayer(dot)
-        tap.onClick = { [unowned self] _, clicks in mood == "idle" && clicks >= 2 ? wake() : react() }
+        tap.onClick = { [unowned self] _, clicks in ["idle", "offline"].contains(mood) && clicks >= 2 ? wake() : react() }
         tap.toolTip = "Poke me! (double-click to wake me up)"
 
         title.font = .boldSystemFont(ofSize: 13)
@@ -374,23 +374,28 @@ final class Tap: NSView {
     func update(status st: String, note: String?, request: String?, last: String, reply: String) {
         if st != lastStatus, st.hasPrefix("waiting"), !lastStatus.isEmpty { popUntil = Date().addingTimeInterval(8) }  // done!
         if reply != self.reply { self.reply = reply; pages = paginate(reply); page = 0 }
+        if st != lastStatus, st.hasPrefix("waiting") { waitingSince = Date() }
         lastStatus = st
         status = st; self.note = note; self.request = request; self.last = last
         refresh()
     }
 
     func refresh() {
+        // Waiting (connected) for 5 minutes: dozes off, until you hover or message. Any other status means
+        // the session isn't listening to the window: "offline".
+        if hovering, mood == "idle" { waitingSince = Date() }
         let m = request != nil ? "approval" : status == "working" ? "working" : status == "stopping" ? "stopping"
-            : status.hasPrefix("waiting") ? "waiting" : Date() < awakeUntil ? "awake" : "idle"
+            : status.hasPrefix("waiting") ? (Date().timeIntervalSince(waitingSince) > 300 ? "idle" : "waiting") : "offline"
         setMood(m)
         title.stringValue = Date() < reactUntil ? reaction : note ?? [
             "approval": "Claude needs your OK 👀", "working": "Working on it…",
             "waiting": "Done! What's next? ✨", "stopping": "Stopping… 😟",
-            "awake": "I'm up! ☀️ Type anything in Claude to reconnect me",
-            "idle": "Napping… 💤 double-click me to wake up"][m]!
+            "offline": "Disconnected 🔌", "idle": "Napping… 💤"][m]!
         // Done: Claude's reply, a page at a time. Otherwise: the request, or what Claude is doing.
         let talking = m == "waiting" && !pages.isEmpty
-        show(request ?? (talking ? pages[page] : last), typed: talking)
+        let hint = ["offline": "Your Claude session isn't listening to me. Send one message in Claude to reconnect me, or double-click me to open it.",
+                    "idle": "Still connected. Message me anytime, or hover to wake me up."][m]
+        show(request ?? (talking ? pages[page] : hint ?? last), typed: talking)
         let typing = panel.isKeyWindow && chat.currentEditor() != nil
         let open = pinned || hovering || typing || request != nil || Date() < popUntil
         if open != expanded {
@@ -536,7 +541,7 @@ final class Tap: NSView {
         guard m != mood else { return }
         mood = m
         let color: NSColor = ["approval": .systemOrange, "waiting": .systemGreen, "working": .white,
-                              "stopping": .systemRed, "awake": .white][m] ?? .gray
+                              "stopping": .systemRed][m] ?? .gray
         CATransaction.begin()
         CATransaction.setAnimationDuration(0.3)
         express()
@@ -586,7 +591,7 @@ final class Tap: NSView {
     // The look for the current mood: lids, iris color, pupils, brows (the second brow a beat later).
     func express() {
         let iris: NSColor = ["approval": .systemOrange, "waiting": .systemGreen, "stopping": .systemRed,
-                             "idle": .gray][mood] ?? .systemBlue
+                             "idle": .gray, "offline": .gray][mood] ?? .systemBlue
         for (i, e) in eyes.enumerated() {
             let apply = {
                 switch self.mood {
@@ -600,8 +605,8 @@ final class Tap: NSView {
                     e.set(open: 0.3, tilt: i == 0 ? -0.3 : 0.3, pupil: 0.85, color: iris, brow: (2, 0.4, 0.2))
                 case "working":   // focused: lids a little low, brows down and drawn in
                     e.set(open: 0.18, color: iris, brow: (-1.2, -0.22, 0.25))
-                default:          // awake and curious
-                    e.set(open: 0.02, pupil: 1.1, color: iris, brow: (3, 0.1, 0.7))
+                default:          // offline: puzzled, looking around for you
+                    e.set(open: 0.12, pupil: 0.95, color: iris, brow: (1.6, 0.28, 0.35))
                 }
             }
             if i == 0 { apply() } else { DispatchQueue.main.asyncAfter(deadline: .now() + 0.06) { apply() } }
@@ -612,12 +617,12 @@ final class Tap: NSView {
     // Needs you / done: looking at you (the cursor), with a glance away now and then. Stopping: nervous darts.
     var followCursor: Bool { ["approval", "waiting"].contains(mood) }
     func scheduleGaze() {
-        let (lo, hi): (Double, Double) = ["working": (0.25, 1.1), "stopping": (0.15, 0.45), "awake": (0.3, 0.8)][mood] ?? (3.5, 7)
+        let (lo, hi): (Double, Double) = ["working": (0.25, 1.1), "stopping": (0.15, 0.45), "offline": (1.2, 2.8)][mood] ?? (3.5, 7)
         DispatchQueue.main.asyncAfter(deadline: .now() + .random(in: lo...hi)) { [self] in
             switch mood {
             case "working": saccade(.random(in: -0.9...0.9), .random(in: -0.1...0.8))
             case "stopping": saccade(.random(in: -0.9...0.9), .random(in: -0.3...0.3))
-            case "awake": saccade(.random(in: -1...1), .random(in: -0.8...0.5))
+            case "offline": saccade(.random(in: -1...1), .random(in: -0.8...0.5))  // searching for you
             case "approval", "waiting":  // glance away briefly, then back at you
                 glanceUntil = Date().addingTimeInterval(.random(in: 0.5...1.1))
                 saccade(.random(in: -0.9...0.9), .random(in: -0.6...0.2))
@@ -660,15 +665,15 @@ final class Tap: NSView {
         floatAway(z, dx: 8, dy: expanded ? -22 : -10, duration: 1.5)
     }
 
-    // Double-click while napping: wake up and bring the Claude app forward. An idle Claude session
-    // can't be restarted from outside; one message typed there reconnects the agent.
+    // Double-click. Dozing (still connected): wake up. Offline: bring the Claude app forward; an idle
+    // Claude session can't be restarted from outside, and one message typed there reconnects the agent.
     func wake() {
-        awakeUntil = Date().addingTimeInterval(12)
-        refresh()
         let hop = CAKeyframeAnimation(keyPath: "transform.translation.y")
         hop.values = [0, -10, 0]
         hop.duration = 0.4
         head.add(hop, forKey: "wake")
+        if mood == "idle" { waitingSince = Date(); return say("I'm up! ☀️ What's next?") }
+        say("Opening Claude… send one message there to reconnect me 🔌")
         guard let pid = readJSON("session.json")["pid"] as? Int, let host = hostApp(of: pid_t(pid)) else { return }
         host.activate()
     }
@@ -676,7 +681,7 @@ final class Tap: NSView {
     // Natural, random blinking whose pace follows the mood; sometimes a double blink.
     func scheduleBlink() {
         let (lo, hi, double): (Double, Double, Double) = [
-            "approval": (1.2, 3, 0.5), "stopping": (0.8, 2, 0.35), "waiting": (3, 6, 0.1), "awake": (1, 2.5, 0.3),
+            "approval": (1.2, 3, 0.5), "stopping": (0.8, 2, 0.35), "waiting": (3, 6, 0.1), "offline": (2, 4.5, 0.2),
         ][mood] ?? (2.5, 5.5, 0.15)
         DispatchQueue.main.asyncAfter(deadline: .now() + .random(in: lo...hi)) { [self] in
             if mood != "idle" {  // asleep: no blinking

@@ -47,7 +47,8 @@ Click **Notch** in the window (or open it with `/pip notch`) to hide it and move
   - 😲 **surprised** (wide eyes, pinpoint pupils) when Claude needs your OK, staring right at you
   - 😊 **happy** (smiling eyes, blush) when Claude is done
   - 😟 **worried** (droopy eyes, sweat drop) when you press Stop
-  - 😴 **dozes off** and sleeps when idle. **Double-click** it to wake it up
+  - 😴 **dozes off** after 5 quiet minutes (still connected: message it anytime, or hover / double-click to wake it)
+  - 🔌 **disconnected** (gray, puzzled, looking for you) when your Claude session isn't listening. Send one message in Claude to reconnect it, or double-click it to jump to Claude
 - 🖱️ **hover over the notch** to open it: status, what Claude just did, Approve / Decline / Stop, and a **chat box** to send instructions
 - 👻 move over the pill beside the notch and it turns see-through, so the menu bar items under it stay clickable
 - 💬 when Claude finishes, it **tells you the answer** in a speech bubble. Long answers come in pages: click the right side for the next page, the left side to go back
